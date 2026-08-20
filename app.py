@@ -124,6 +124,7 @@ FAMILY_PIN = str(secret("FAMILY_PIN", "")).strip()
 APP_TIMEZONE = secret("APP_TIMEZONE", "Asia/Tokyo")
 SUPABASE_URL = secret("SUPABASE_URL", "")
 SUPABASE_SECRET_KEY = secret("SUPABASE_SECRET_KEY", "")
+USE_FAST_MODE = str(secret("USE_FAST_MODE", "true")).lower() in {"1", "true", "yes", "on"}
 
 
 # ============================================================
@@ -198,10 +199,11 @@ def require_family_pin():
 # OpenAI helpers
 # ============================================================
 def ask_json(prompt, name, schema, max_output_tokens=700):
-    result = openai_client().responses.create(
-        model=TEXT_MODEL,
-        input=prompt,
-        text={
+    args = {
+        "model": TEXT_MODEL,
+        "input": prompt,
+        "reasoning": {"effort": "none"},
+        "text": {
             "format": {
                 "type": "json_schema",
                 "name": name,
@@ -209,9 +211,12 @@ def ask_json(prompt, name, schema, max_output_tokens=700):
                 "schema": schema,
             }
         },
-        max_output_tokens=max_output_tokens,
-        store=False,
-    )
+        "max_output_tokens": max_output_tokens,
+        "store": False,
+    }
+    if USE_FAST_MODE:
+        args["service_tier"] = "fast"
+    result = openai_client().responses.create(**args)
     return json.loads(result.output_text)
 
 
@@ -225,6 +230,25 @@ def transcribe_audio(audio_file, context=""):
     if context:
         prompt += " 文脈: " + context[:900]
 
+    result = openai_client().audio.transcriptions.create(
+        model=TRANSCRIBE_MODEL,
+        file=audio_file,
+        language="ja",
+        prompt=prompt,
+    )
+    return result.text.strip()
+
+
+def transcribe_card_audio(audio_file, card_type):
+    """Transcribe a short card phrase while preserving the heard sound over semantic guessing."""
+    audio_file.seek(0)
+    card_label = "お題カード" if card_type == "topic" else "言い方カード"
+    prompt = (
+        f"カードゲーム『言いカエル』の{card_label}に書かれた短い日本語を読んでいます。"
+        "意味から正解を推測したり、似た意味の表現へ言い換えたりしないでください。"
+        "聞こえた音そのものを最優先し、語尾・助詞・濁音・長音もできるだけ保って、"
+        "最もその音に近く聞こえた短い語句を1つだけ文字起こししてください。"
+    )
     result = openai_client().audio.transcriptions.create(
         model=TRANSCRIBE_MODEL,
         file=audio_file,
@@ -308,6 +332,92 @@ def speech_bytes(text):
                 os.remove(temp_path)
             except OSError:
                 pass
+
+
+def card_candidates(raw_text, card_type):
+    schema = {
+        "type": "object",
+        "properties": {
+            "candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "reading": {"type": "string"},
+                    },
+                    "required": ["text", "reading"],
+                    "additionalProperties": False,
+                },
+                "minItems": 3,
+                "maxItems": 5,
+            }
+        },
+        "required": ["candidates"],
+        "additionalProperties": False,
+    }
+
+    if card_type == "topic":
+        type_rule = (
+            "お題カードなので、候補は人・物・状態・行動などを表す短い語句の形になり得ます。"
+            "ただし、この情報を使って意味から別表現を推測してはいけません。"
+        )
+    else:
+        type_rule = (
+            "言い方カードなので、候補は『〜く』『〜そうに』『〜っぽく』等の短い指定表現になり得ます。"
+            "ただし、この情報を使って意味から別表現を推測してはいけません。"
+        )
+
+    result = ask_json(
+        f"""
+カードゲーム『言いカエル』で、1枚のカードを声で読んだ音から文字候補を作ります。
+
+【いったん文字起こしされた音】
+{raw_text}
+
+【カード種別について】
+{type_rule}
+
+【最重要】
+候補は「意味が似ている言葉」ではなく、「発音が似ていて聞き間違える可能性がある言葉」にしてください。
+意味・概念・ニュアンスが近いだけの類義語や言い換えは絶対に候補にしません。
+
+【候補の作り方】
+- まず raw_text をひらがなの読みとして捉える。
+- その読みと音が近い語句だけを3〜5個作る。
+- 読みの長さ（モーラ数）はできるだけ近くする。
+- 違いは原則として1〜2か所程度に抑える。
+- 想定してよい違い：濁音/半濁音、促音「っ」、長音、拗音「ゃゅょ」、母音の聞き違い、1音程度の脱落/挿入、助詞「は/が/を/に/の」等の聞き違い。
+- 漢字・ひらがな・カタカナの表記差は、実物カードとの照合に役立つ場合だけ候補にしてよい。
+- raw_text と全く同じ音の単なる表記違いばかりにはしない。
+- 文法的に不自然すぎる候補は避ける。
+- カードゲームとして『ありそうな意味』を推測して候補を作らない。音だけを根拠にする。
+
+【禁止例】
+「かっこよく」と聞こえたから、意味の近い「強そうに」「勇ましく」を出す → 禁止。
+「ゆっくり」と聞こえたから、意味の近い「のんびり」「マイペース」を出す → 禁止。
+
+【出力】
+- text：実際の候補として画面に出す語句。
+- reading：その候補の発音を、ひらがなで書く。
+- 音声認識結果に最も近い候補を先頭にする。
+""".strip(),
+        f"card_sound_candidates_{card_type}",
+        schema,
+        max_output_tokens=320,
+    )
+
+    candidates = []
+    raw = " ".join(str(raw_text or "").split()).strip()
+    if raw:
+        candidates.append(raw)
+
+    for item in result.get("candidates", []):
+        candidate = " ".join(str(item.get("text", "") or "").split()).strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    return candidates[:5]
 
 
 # ============================================================
@@ -596,7 +706,11 @@ def reset_round():
         st.session_state[key] = fresh_default(value)
     st.session_state.round_serial = serial
     for key in list(st.session_state.keys()):
-        if key.startswith(("take_", "transcript_", "review_audio_")):
+        if key.startswith((
+            "take_", "transcript_", "review_audio_",
+            "topic_draft_", "style_draft_", "topic_audio_", "style_audio_",
+            "_topic_", "_style_", "_topic_draft_", "_style_draft_",
+        )):
             del st.session_state[key]
 
 
@@ -680,12 +794,20 @@ def audio_digest(uploaded_file):
         return ""
 
 
-def voice_fill_text(field_key, audio_key, label, placeholder, context=""):
-    current = str(st.session_state.get(field_key, ""))
-    st.markdown(f"**{label}**")
-    audio = st.audio_input(f"🎤 {label}を話してね", sample_rate=16000, key=audio_key)
-
+def voice_select_card(field_key, audio_key, label, card_type, context=""):
+    transcript_key = f"_{field_key}_transcript"
+    candidates_key = f"_{field_key}_candidates"
     digest_key = f"_{audio_key}_digest"
+    radio_key = f"_{field_key}_radio"
+    manual_key = f"_{field_key}_manual"
+
+    st.markdown(f"**{label}**")
+    audio = st.audio_input(
+        f"🎤 {label}を読んでね",
+        sample_rate=16000,
+        key=audio_key,
+    )
+
     if audio is not None:
         digest = audio_digest(audio)
         if digest and st.session_state.get(digest_key) != digest:
@@ -694,11 +816,16 @@ def voice_fill_text(field_key, audio_key, label, placeholder, context=""):
                 audio_for_transcription = io.BytesIO(boosted.getvalue())
                 audio_for_transcription.name = "recording_boosted.wav"
                 with st.spinner(f"{label}を聞いています…"):
-                    transcript = transcribe_audio(audio_for_transcription, context)
-                if transcript:
-                    st.session_state[field_key] = transcript
+                    transcript = transcribe_card_audio(audio_for_transcription, card_type)
+                    candidates = card_candidates(transcript, card_type) if transcript else []
+
+                if transcript and candidates:
+                    st.session_state[transcript_key] = transcript
+                    st.session_state[candidates_key] = candidates
                     st.session_state[digest_key] = digest
-                    current = transcript
+                    st.session_state.pop(radio_key, None)
+                    st.session_state.pop(manual_key, None)
+                    st.rerun()
                 else:
                     st.warning(f"{label}をうまく聞き取れませんでした。もう一度話してください。")
             except Exception as exc:
@@ -706,15 +833,31 @@ def voice_fill_text(field_key, audio_key, label, placeholder, context=""):
                 with st.expander("保護者向け詳細"):
                     st.code(str(exc))
 
-    value = st.text_input(
-        label,
-        value=str(st.session_state.get(field_key, current)),
-        placeholder=placeholder,
-        key=f"edit_{field_key}",
-        label_visibility="collapsed",
+    candidates = list(st.session_state.get(candidates_key, []))
+    if not candidates:
+        st.caption("カードを声で読むと、聞き取り候補がここに出ます。")
+        return ""
+
+    transcript = str(st.session_state.get(transcript_key, "")).strip()
+    if transcript:
+        st.caption(f"いちばん近く聞こえた音：{transcript}")
+
+    options = candidates + ["どれもちがう"]
+    selected = st.radio(
+        "実際のカードに書いてある言葉を選んでね",
+        options,
+        key=radio_key,
     )
-    st.session_state[field_key] = value
-    return value
+
+    if selected == "どれもちがう":
+        manual = st.text_input(
+            "カードに書いてある言葉を入力",
+            key=manual_key,
+            placeholder="候補にないときだけ入力",
+        )
+        return str(manual or "").strip()
+
+    return str(selected or "").strip()
 
 
 def apply_support_result(child_request, level, result):
@@ -843,21 +986,21 @@ if page == "これまで":
 
 if not st.session_state.round_active:
     st.subheader("カードをセット")
-    st.caption("お題と『言い方』は声で入れられます。聞き取ったあと、下の欄で直せます。")
+    st.caption("カードを声で読むと、意味ではなく音が近い候補が出ます。実物のカードと同じ言葉を選んでください。")
 
-    base_context = "カードゲーム『言いカエル』の入力です。短い言葉やフレーズとして自然に文字起こししてください。"
-    topic = voice_fill_text(
+    base_context = "カードゲーム『言いカエル』のカードを読み上げています。短い語句として、聞こえた音をできるだけそのまま文字起こししてください。"
+    topic = voice_select_card(
         field_key=f"topic_draft_{st.session_state.round_serial}",
         audio_key=f"topic_audio_{st.session_state.round_serial}",
         label="お題カード",
-        placeholder="例：走るのが遅い人",
+        card_type="topic",
         context=base_context + " 今はお題カードです。",
     )
-    style = voice_fill_text(
+    style = voice_select_card(
         field_key=f"style_draft_{st.session_state.round_serial}",
         audio_key=f"style_audio_{st.session_state.round_serial}",
         label="言い方カード",
-        placeholder="例：カッコよく",
+        card_type="style",
         context=base_context + " 今は言い方カードです。",
     )
     ai_join = st.checkbox("AIもこのラウンドに参加する", value=True)
