@@ -594,8 +594,11 @@ def player_answers(topic, style):
 def player_speech_text(answers):
     return (
         f"たとえカエル。{answers['metaphor']['answer']}。"
+        f"その理由は、{answers['metaphor']['why']}。"
         f"なまえカエル。{answers['nickname']['answer']}。"
+        f"その理由は、{answers['nickname']['why']}。"
         f"ぎゃくてんカエル。{answers['twist']['answer']}。"
+        f"その理由は、{answers['twist']['why']}。"
     )
 
 
@@ -675,6 +678,7 @@ DEFAULTS = {
     "ai_answers": None,
     "ai_revealed": False,
     "ai_audio": None,
+    "ai_audio_autoplay_pending": False,
     "support_open": False,
     "support_request": "",
     "support_level": 0,
@@ -1186,13 +1190,19 @@ else:
                         st.session_state.ai_audio = speech_bytes(
                             player_speech_text(st.session_state.ai_answers)
                         )
+                    st.session_state.ai_audio_autoplay_pending = True
                     st.rerun()
                 except Exception as exc:
                     st.error("読み上げ音声を作れませんでした。")
                     with st.expander("保護者向け詳細"):
                         st.code(str(exc))
         else:
-            st.audio(st.session_state.ai_audio, format="audio/wav")
+            st.audio(
+                st.session_state.ai_audio,
+                format="audio/wav",
+                autoplay=bool(st.session_state.ai_audio_autoplay_pending),
+            )
+            st.session_state.ai_audio_autoplay_pending = False
 
 
 st.divider()
