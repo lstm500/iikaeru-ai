@@ -6,6 +6,7 @@ import time
 import hmac
 import wave
 import audioop
+import hashlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -74,6 +75,31 @@ st.markdown(
         font-size: .93rem;
         opacity: .82;
       }
+      .answer-label-row {
+        display: flex;
+        align-items: center;
+        gap: .5rem;
+        margin-bottom: .15rem;
+      }
+      .answer-label-mini {
+        font-size: .82rem;
+        line-height: 1.2;
+        font-weight: 700;
+        opacity: .82;
+      }
+      .frog-badge {
+        width: 1.65rem;
+        height: 1.65rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        font-size: 1rem;
+        border: 1px solid rgba(0,0,0,.08);
+      }
+      .frog-yellow { background: #FFF2A8; }
+      .frog-blue { background: #CFE8FF; }
+      .frog-pink { background: #FFD5E5; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -642,6 +668,55 @@ def voice_review(key, title, context=""):
     return None
 
 
+def audio_digest(uploaded_file):
+    if uploaded_file is None:
+        return ""
+    try:
+        uploaded_file.seek(0)
+        data = uploaded_file.read()
+        uploaded_file.seek(0)
+        return hashlib.sha1(data).hexdigest()
+    except Exception:
+        return ""
+
+
+def voice_fill_text(field_key, audio_key, label, placeholder, context=""):
+    current = str(st.session_state.get(field_key, ""))
+    st.markdown(f"**{label}**")
+    audio = st.audio_input(f"🎤 {label}を話してね", sample_rate=16000, key=audio_key)
+
+    digest_key = f"_{audio_key}_digest"
+    if audio is not None:
+        digest = audio_digest(audio)
+        if digest and st.session_state.get(digest_key) != digest:
+            try:
+                boosted = boost_recorded_wav(audio)
+                audio_for_transcription = io.BytesIO(boosted.getvalue())
+                audio_for_transcription.name = "recording_boosted.wav"
+                with st.spinner(f"{label}を聞いています…"):
+                    transcript = transcribe_audio(audio_for_transcription, context)
+                if transcript:
+                    st.session_state[field_key] = transcript
+                    st.session_state[digest_key] = digest
+                    current = transcript
+                else:
+                    st.warning(f"{label}をうまく聞き取れませんでした。もう一度話してください。")
+            except Exception as exc:
+                st.error(f"{label}の聞き取りに失敗しました。もう一度試してください。")
+                with st.expander("保護者向け詳細"):
+                    st.code(str(exc))
+
+    value = st.text_input(
+        label,
+        value=str(st.session_state.get(field_key, current)),
+        placeholder=placeholder,
+        key=f"edit_{field_key}",
+        label_visibility="collapsed",
+    )
+    st.session_state[field_key] = value
+    return value
+
+
 def apply_support_result(child_request, level, result):
     st.session_state.support_request = child_request
     st.session_state.support_level = level
@@ -706,16 +781,19 @@ def render_support_result():
 
 def render_player_answers(answers):
     labels = [
-        ("metaphor", "たとえカエル"),
-        ("nickname", "なまえカエル"),
-        ("twist", "ぎゃくてんカエル"),
+        ("metaphor", "たとえカエル", "frog-yellow"),
+        ("nickname", "なまえカエル", "frog-blue"),
+        ("twist", "ぎゃくてんカエル", "frog-pink"),
     ]
-    for key, label in labels:
+    for key, label, color_class in labels:
         item = answers[key]
         st.markdown(
             f"""
             <div class="answer-card">
-              <b>{label}</b><br>
+              <div class="answer-label-row">
+                <span class="frog-badge {color_class}">🐸</span>
+                <span class="answer-label-mini">{label}</span>
+              </div>
               <div class="answer-main">{item['answer']}</div>
               <div class="small-note">{item['why']}</div>
             </div>
@@ -765,23 +843,28 @@ if page == "これまで":
 
 if not st.session_state.round_active:
     st.subheader("カードをセット")
-    st.caption("カードに書かれている『お題』と『言い方』を入力します。")
+    st.caption("お題と『言い方』は声で入れられます。聞き取ったあと、下の欄で直せます。")
 
-    topic = st.text_input(
-        "お題カード",
+    base_context = "カードゲーム『言いカエル』の入力です。短い言葉やフレーズとして自然に文字起こししてください。"
+    topic = voice_fill_text(
+        field_key=f"topic_draft_{st.session_state.round_serial}",
+        audio_key=f"topic_audio_{st.session_state.round_serial}",
+        label="お題カード",
         placeholder="例：走るのが遅い人",
-        key=f"topic_input_{st.session_state.round_serial}",
+        context=base_context + " 今はお題カードです。",
     )
-    style = st.text_input(
-        "言い方カード",
+    style = voice_fill_text(
+        field_key=f"style_draft_{st.session_state.round_serial}",
+        audio_key=f"style_audio_{st.session_state.round_serial}",
+        label="言い方カード",
         placeholder="例：カッコよく",
-        key=f"style_input_{st.session_state.round_serial}",
+        context=base_context + " 今は言い方カードです。",
     )
     ai_join = st.checkbox("AIもこのラウンドに参加する", value=True)
 
     if st.button("このお題ではじめる", type="primary", use_container_width=True):
-        topic = topic.strip()
-        style = style.strip()
+        topic = str(topic).strip()
+        style = str(style).strip()
         if not topic or not style:
             st.warning("お題カードと言い方カードを両方入れてください。")
         else:
@@ -791,12 +874,8 @@ if not st.session_state.round_active:
                 st.session_state.topic = topic
                 st.session_state.style = style
                 st.session_state.ai_joined = bool(ai_join)
-
-                if ai_join:
-                    with st.spinner("AIもこっそり考えています…"):
-                        answers = player_answers(topic, style)
-                    st.session_state.ai_answers = answers
-                    update_round_history(round_id, ai_answers=answers)
+                st.session_state.ai_answers = None
+                st.session_state.ai_revealed = False
 
                 st.session_state.round_active = True
                 st.rerun()
@@ -932,11 +1011,29 @@ if not st.session_state.ai_joined:
                 st.code(str(exc))
 else:
     if not st.session_state.ai_revealed:
-        st.info("AIも3つ考えました。まだ答えは伏せています。")
+        if st.session_state.ai_answers is None:
+            st.info("AIはまだ答えを作っていません。見るときに3つまとめて考えるので、はじめの読み込みが速くなっています。")
+        else:
+            st.info("AIも3つ考えました。まだ答えは伏せています。")
+
         if st.button("AIの答えを見る", type="primary", use_container_width=True):
-            st.session_state.ai_revealed = True
-            update_round_history(st.session_state.round_id, ai_revealed=True)
-            st.rerun()
+            try:
+                if st.session_state.ai_answers is None:
+                    with st.spinner("AIが3つ考えています…"):
+                        answers = player_answers(st.session_state.topic, st.session_state.style)
+                    st.session_state.ai_answers = answers
+                    update_round_history(
+                        st.session_state.round_id,
+                        ai_joined=True,
+                        ai_answers=answers,
+                    )
+                st.session_state.ai_revealed = True
+                update_round_history(st.session_state.round_id, ai_revealed=True)
+                st.rerun()
+            except Exception as exc:
+                st.error("AIの回答を作れませんでした。もう一度試してください。")
+                with st.expander("保護者向け詳細"):
+                    st.code(str(exc))
     else:
         render_player_answers(st.session_state.ai_answers)
         if not st.session_state.ai_audio:
