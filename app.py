@@ -864,11 +864,29 @@ def voice_select_card(field_key, audio_key, label, card_type, context=""):
     return str(selected or "").strip()
 
 
+def support_speech_text(result):
+    parts = [str(result.get("message", "")).strip()]
+    notes = result.get("word_notes", []) or []
+    if notes:
+        parts.append("ことばメモも聞いてね。")
+        for note in notes:
+            word = str(note.get("word", "")).strip()
+            meaning = str(note.get("meaning", "")).strip()
+            image = str(note.get("image", "")).strip()
+            if word:
+                parts.append(f"{word}。")
+            if meaning:
+                parts.append(f"意味は、{meaning}。")
+            if image:
+                parts.append(f"たとえば、{image}。")
+    return " ".join(part for part in parts if part)
+
+
 def apply_support_result(child_request, level, result):
     st.session_state.support_request = child_request
     st.session_state.support_level = level
     st.session_state.support_result = result
-    st.session_state.support_audio = speech_bytes(result["message"])
+    st.session_state.support_audio = speech_bytes(support_speech_text(result))
     st.session_state.support_autoplay_pending = True
 
     event = {
