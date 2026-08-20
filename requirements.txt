@@ -1,0 +1,3 @@
+streamlit>=1.61,<2
+openai>=2,<3
+supabase>=2,<3
