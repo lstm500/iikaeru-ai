@@ -100,6 +100,17 @@ st.markdown(
       .frog-yellow { background: #FFF2A8; }
       .frog-blue { background: #CFE8FF; }
       .frog-pink { background: #FFD5E5; }
+      .judge-card {
+        border: 2px solid rgba(80,160,100,.35);
+        border-radius: 20px;
+        padding: 1rem 1.05rem;
+        margin: .6rem 0 .8rem;
+      }
+      .judge-winner {
+        font-size: 1.25rem;
+        line-height: 1.5;
+        font-weight: 800;
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -125,6 +136,14 @@ APP_TIMEZONE = secret("APP_TIMEZONE", "Asia/Tokyo")
 SUPABASE_URL = secret("SUPABASE_URL", "")
 SUPABASE_SECRET_KEY = secret("SUPABASE_SECRET_KEY", "")
 USE_FAST_MODE = str(secret("USE_FAST_MODE", "true")).lower() in {"1", "true", "yes", "on"}
+
+
+# ============================================================
+# Card master (from the family-made list)
+# ============================================================
+TOPIC_CARDS = ['ゲーマー', '老後', 'ボランティア', '料理教室', '釣り', '旅行', 'ゲーム', '読書', '音楽', 'スポーツ観戦', 'パーティー', '会議', '面接', 'テスト', '夏休み', 'お正月', 'クリスマス', '誕生日', '葬式', '結婚式', 'デート', '通学', '買い物', '掃除', '料理', '植物', 'ペット', '隣人', '部下', '上司', 'ライバル', '後輩', '先輩', '親友', '家族', '努力家', '天才', 'ベジタリアン', '夜型の人', '早起きの人', 'コレクター', '受験生', 'アルバイト', '社長', 'ユーチューバー', 'アーティスト', 'プログラマー', '宇宙飛行士', '警察官', '医者', '教師', '学生', '主婦', '芸能人', 'スマートフォン', 'お金持ち', '自動車', '恋人', '痩せている人', '太っている人', 'ANY（出題者がお題を考えます）']
+STYLE_CARDS = ['皮肉たっぷりに', '回りくどく', '映画・ドラマのセリフ風に', '歌の歌詞風に', '漫画・アニメ・ゲームに例えて', '動物に例えて', '可愛く', '子どもっぽく', '超前向きな言葉で', '四字熟語で', 'ストレートに', '怖い感じに', 'ギャル風に', '詩的に', '古風に', 'ファンタジー風に', '悲しい雰囲気で', 'カッコよく', '辛辣に', 'やさしく']
+ANY_TOPIC_CARD = "ANY（出題者がお題を考えます）"
 
 
 # ============================================================
@@ -239,15 +258,22 @@ def transcribe_audio(audio_file, context=""):
     return result.text.strip()
 
 
+def allowed_cards(card_type):
+    return TOPIC_CARDS if card_type == "topic" else STYLE_CARDS
+
+
 def transcribe_card_audio(audio_file, card_type):
-    """Transcribe a short card phrase while preserving the heard sound over semantic guessing."""
+    """Transcribe one card while strongly biasing recognition to the actual card master."""
     audio_file.seek(0)
     card_label = "お題カード" if card_type == "topic" else "言い方カード"
+    master = allowed_cards(card_type)
+    master_text = "、".join(master)
     prompt = (
-        f"カードゲーム『言いカエル』の{card_label}に書かれた短い日本語を読んでいます。"
-        "意味から正解を推測したり、似た意味の表現へ言い換えたりしないでください。"
-        "聞こえた音そのものを最優先し、語尾・助詞・濁音・長音もできるだけ保って、"
-        "最もその音に近く聞こえた短い語句を1つだけ文字起こししてください。"
+        f"カードゲーム『言いカエル』の{card_label}を1枚、声で読んでいます。"
+        "原則として次のカード一覧のどれかです。意味が近い別表現へ言い換えず、"
+        "聞こえた発音そのものに最も近いカード語を意識して文字起こししてください。"
+        "濁音・半濁音・長音・促音・拗音・助詞をできるだけ保ってください。"
+        f" カード一覧: {master_text}"
     )
     result = openai_client().audio.transcriptions.create(
         model=TRANSCRIBE_MODEL,
@@ -335,21 +361,14 @@ def speech_bytes(text):
 
 
 def card_candidates(raw_text, card_type):
+    master = allowed_cards(card_type)
     schema = {
         "type": "object",
         "properties": {
             "candidates": {
                 "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "reading": {"type": "string"},
-                    },
-                    "required": ["text", "reading"],
-                    "additionalProperties": False,
-                },
-                "minItems": 3,
+                "items": {"type": "string", "enum": master},
+                "minItems": 1,
                 "maxItems": 5,
             }
         },
@@ -357,65 +376,39 @@ def card_candidates(raw_text, card_type):
         "additionalProperties": False,
     }
 
-    if card_type == "topic":
-        type_rule = (
-            "お題カードなので、候補は人・物・状態・行動などを表す短い語句の形になり得ます。"
-            "ただし、この情報を使って意味から別表現を推測してはいけません。"
-        )
-    else:
-        type_rule = (
-            "言い方カードなので、候補は『〜く』『〜そうに』『〜っぽく』等の短い指定表現になり得ます。"
-            "ただし、この情報を使って意味から別表現を推測してはいけません。"
-        )
-
+    master_lines = "\n".join(f"- {item}" for item in master)
     result = ask_json(
         f"""
-カードゲーム『言いカエル』で、1枚のカードを声で読んだ音から文字候補を作ります。
+カードゲーム『言いカエル』の音声認識結果を、実在するカード一覧と照合します。
 
-【いったん文字起こしされた音】
+【聞こえた文字】
 {raw_text}
 
-【カード種別について】
-{type_rule}
+【実在するカード】
+{master_lines}
 
-【最重要】
-候補は「意味が似ている言葉」ではなく、「発音が似ていて聞き間違える可能性がある言葉」にしてください。
-意味・概念・ニュアンスが近いだけの類義語や言い換えは絶対に候補にしません。
-
-【候補の作り方】
-- まず raw_text をひらがなの読みとして捉える。
-- その読みと音が近い語句だけを3〜5個作る。
-- 読みの長さ（モーラ数）はできるだけ近くする。
-- 違いは原則として1〜2か所程度に抑える。
-- 想定してよい違い：濁音/半濁音、促音「っ」、長音、拗音「ゃゅょ」、母音の聞き違い、1音程度の脱落/挿入、助詞「は/が/を/に/の」等の聞き違い。
-- 漢字・ひらがな・カタカナの表記差は、実物カードとの照合に役立つ場合だけ候補にしてよい。
-- raw_text と全く同じ音の単なる表記違いばかりにはしない。
-- 文法的に不自然すぎる候補は避ける。
-- カードゲームとして『ありそうな意味』を推測して候補を作らない。音だけを根拠にする。
-
-【禁止例】
-「かっこよく」と聞こえたから、意味の近い「強そうに」「勇ましく」を出す → 禁止。
-「ゆっくり」と聞こえたから、意味の近い「のんびり」「マイペース」を出す → 禁止。
-
-【出力】
-- text：実際の候補として画面に出す語句。
-- reading：その候補の発音を、ひらがなで書く。
-- 音声認識結果に最も近い候補を先頭にする。
+【最重要ルール】
+- 候補は上の実在カードからだけ選ぶ。新しい言葉を作らない。
+- 意味が似ているかではなく、発音が似ているかだけで順位をつける。
+- ひらがなで読んだときの音を比較する。
+- 濁音/半濁音、長音、促音「っ」、拗音「ゃゅょ」、母音、1音程度の脱落・挿入、助詞の聞き違いを考慮する。
+- 意味が近くても音が遠いカードは候補にしない。
+- 最も音が近いカードを先頭にし、最大5件まで。
 """.strip(),
-        f"card_sound_candidates_{card_type}",
+        f"card_master_match_{card_type}",
         schema,
-        max_output_tokens=320,
+        max_output_tokens=220,
     )
 
     candidates = []
-    raw = " ".join(str(raw_text or "").split()).strip()
-    if raw:
-        candidates.append(raw)
-
     for item in result.get("candidates", []):
-        candidate = " ".join(str(item.get("text", "") or "").split()).strip()
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
+        item = str(item).strip()
+        if item in master and item not in candidates:
+            candidates.append(item)
+
+    raw = " ".join(str(raw_text or "").split()).strip()
+    if raw in master:
+        candidates = [raw] + [x for x in candidates if x != raw]
 
     return candidates[:5]
 
@@ -602,6 +595,71 @@ def player_speech_text(answers):
     )
 
 
+def judge_answers(topic, style, players):
+    ids = [p["id"] for p in players]
+    schema = {
+        "type": "object",
+        "properties": {
+            "winner_id": {"type": "string", "enum": ids},
+            "reason": {"type": "string"},
+        },
+        "required": ["winner_id", "reason"],
+        "additionalProperties": False,
+    }
+    answer_lines = "\n".join(
+        f"{p['id']} / {p['name']}：{p['answer']}" for p in players
+    )
+    result = ask_json(
+        f"""
+あなたは、家族で遊ぶカードゲーム『言いカエル』の審判です。
+複数人の回答から、今回いちばん良い回答を必ず1つ選んでください。点数は付けません。
+
+【お題カード】
+{topic}
+
+【言い方カード】
+{style}
+
+【みんなの回答】
+{answer_lines}
+
+【判断基準】
+1. お題を保ちながら、指定された『言い方』にきちんと変えられている。
+2. 発想に少し意外さや面白さがある。
+3. 聞いたときに意味や場面を想像しやすい。
+4. 家族で聞いて楽しめる。
+
+【公平にするルール】
+- 長い回答、難しい言葉、大人っぽい言葉だから高評価にはしない。
+- 子どもか大人かを推測して加点・減点しない。
+- 人を傷つける表現や差別的な表現は評価しない。
+- 僅差でも同点にせず、今回の1位を1つ選ぶ。
+- reason は子どもにも分かる短い1文にし、『〜からです。』で終える。
+- reason では他の人をけなさず、1位の回答の良かった点だけを説明する。
+""".strip(),
+        "judge_answers",
+        schema,
+        max_output_tokens=320,
+    )
+
+    winner_id = result["winner_id"]
+    winner = next(p for p in players if p["id"] == winner_id)
+    return {
+        "winner_id": winner_id,
+        "winner_name": winner["name"],
+        "winner_answer": winner["answer"],
+        "reason": result["reason"],
+    }
+
+
+def judge_speech_text(result):
+    return (
+        f"今回いちばん良かったのは、{result['winner_name']}の、"
+        f"『{result['winner_answer']}』です。"
+        f"理由は、{result['reason']}"
+    )
+
+
 # ============================================================
 # Optional Supabase history
 # ============================================================
@@ -687,6 +745,10 @@ DEFAULTS = {
     "support_autoplay_pending": False,
     "support_log": [],
     "learned_words": [],
+    "judge_result": None,
+    "judge_audio_bytes": None,
+    "judge_autoplay_pending": False,
+    "judge_signature": "",
     "round_serial": 0,
 }
 
@@ -714,6 +776,8 @@ def reset_round():
             "take_", "transcript_", "review_audio_",
             "topic_draft_", "style_draft_", "topic_audio_", "style_audio_",
             "_topic_", "_style_", "_topic_draft_", "_style_draft_",
+            "score_player_count_", "score_name_", "score_audio_",
+            "score_answer_", "score_digest_",
         )):
             del st.session_state[key]
 
@@ -864,6 +928,51 @@ def voice_select_card(field_key, audio_key, label, card_type, context=""):
     return str(selected or "").strip()
 
 
+def voice_capture_player_answer(round_serial, index, player_name, topic, style):
+    answer_key = f"score_answer_{round_serial}_{index}"
+    digest_key = f"score_digest_{round_serial}_{index}"
+    audio_key = f"score_audio_{round_serial}_{index}"
+
+    st.markdown(f"**{player_name} の回答**")
+    audio = st.audio_input(
+        f"🎤 {player_name} が答える",
+        sample_rate=16000,
+        key=audio_key,
+    )
+
+    if audio is not None:
+        digest = audio_digest(audio)
+        if digest and st.session_state.get(digest_key) != digest:
+            try:
+                boosted = boost_recorded_wav(audio)
+                audio_for_transcription = io.BytesIO(boosted.getvalue())
+                audio_for_transcription.name = "answer.wav"
+                context = (
+                    f"カードゲーム『言いカエル』です。お題は『{topic}』、"
+                    f"言い方は『{style}』。{player_name}が考えた短い回答を話しています。"
+                    "回答の言葉を勝手に別表現へ直さず、聞こえた通りに文字起こししてください。"
+                )
+                with st.spinner(f"{player_name} の答えを聞いています…"):
+                    transcript = transcribe_audio(audio_for_transcription, context)
+                if transcript:
+                    st.session_state[answer_key] = transcript
+                    st.session_state[digest_key] = digest
+            except Exception as exc:
+                st.error(f"{player_name} の回答を聞き取れませんでした。")
+                with st.expander("保護者向け詳細"):
+                    st.code(str(exc))
+
+    if answer_key not in st.session_state:
+        st.session_state[answer_key] = ""
+
+    answer = st.text_input(
+        f"{player_name} の聞き取り結果",
+        key=answer_key,
+        placeholder="音声を入れるとここに表示されます",
+    )
+    return str(answer or "").strip()
+
+
 def support_speech_text(result):
     parts = [str(result.get("message", "")).strip()]
     notes = result.get("word_notes", []) or []
@@ -976,7 +1085,7 @@ verify_setup()
 require_family_pin()
 
 st.title("🐸 言いカエル おたすけAI")
-st.caption("困ったときはヒント係。遊ぶときはAIもプレイヤー。")
+st.caption("困ったときはヒント係。AIもプレイヤー。最後はAIが審判もできます。")
 st.caption("※ 読み上げ音声はAIが生成した音声です。")
 
 pages = ["あそぶ", "これまで"] if history_enabled() else ["あそぶ"]
@@ -1008,7 +1117,7 @@ if page == "これまで":
 
 if not st.session_state.round_active:
     st.subheader("カードをセット")
-    st.caption("カードを声で読むと、意味ではなく音が近い候補が出ます。実物のカードと同じ言葉を選んでください。")
+    st.caption("登録済みのカード一覧から、声の音に近い実在カードだけを候補表示します。実物と同じ言葉を選んでください。")
 
     base_context = "カードゲーム『言いカエル』のカードを読み上げています。短い語句として、聞こえた音をできるだけそのまま文字起こししてください。"
     topic = voice_select_card(
@@ -1025,6 +1134,12 @@ if not st.session_state.round_active:
         card_type="style",
         context=base_context + " 今は言い方カードです。",
     )
+    if topic == ANY_TOPIC_CARD:
+        topic = st.text_input(
+            "ANYのお題",
+            placeholder="出題者が考えた今回のお題",
+            key=f"any_topic_{st.session_state.round_serial}",
+        ).strip()
     ai_join = st.checkbox("AIもこのラウンドに参加する", value=True)
 
     if st.button("このお題ではじめる", type="primary", use_container_width=True):
@@ -1221,6 +1336,104 @@ else:
                 autoplay=bool(st.session_state.ai_audio_autoplay_pending),
             )
             st.session_state.ai_audio_autoplay_pending = False
+
+
+st.divider()
+
+# -------------------- Judging mode --------------------
+st.subheader("③ AI審判・採点モード")
+st.caption("みんなが順番に答えたあと、AIが今回いちばん良い回答を1つ選び、理由を説明します。点数は付けません。")
+
+serial = st.session_state.round_serial
+player_count = st.selectbox(
+    "人間の参加人数",
+    [2, 3, 4, 5],
+    index=1,
+    key=f"score_player_count_{serial}",
+)
+
+default_names = ["こども", "お父さん", "お母さん", "プレイヤー4", "プレイヤー5"]
+players = []
+for i in range(int(player_count)):
+    name_key = f"score_name_{serial}_{i}"
+    if name_key not in st.session_state:
+        st.session_state[name_key] = default_names[i]
+    name = st.text_input(
+        f"{i + 1}人目の名前",
+        key=name_key,
+    ).strip() or f"プレイヤー{i + 1}"
+    answer = voice_capture_player_answer(
+        serial, i, name, st.session_state.topic, st.session_state.style
+    )
+    players.append({"id": f"P{i + 1}", "name": name, "answer": answer})
+
+ready = all(p["answer"] for p in players)
+current_signature = hashlib.sha1(
+    json.dumps(
+        {
+            "topic": st.session_state.topic,
+            "style": st.session_state.style,
+            "players": players,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+).hexdigest()
+
+if st.session_state.judge_result and st.session_state.judge_signature != current_signature:
+    st.session_state.judge_result = None
+    st.session_state.judge_audio_bytes = None
+    st.session_state.judge_autoplay_pending = False
+    st.session_state.judge_signature = ""
+
+if not ready:
+    st.caption("全員の回答が入ると判定できます。")
+
+if st.button(
+    "🏆 AIに今回の1位を決めてもらう",
+    type="primary",
+    use_container_width=True,
+    disabled=not ready,
+):
+    try:
+        with st.spinner("みんなの答えを比べています…"):
+            result = judge_answers(
+                st.session_state.topic,
+                st.session_state.style,
+                players,
+            )
+            audio_bytes = speech_bytes(judge_speech_text(result))
+        st.session_state.judge_result = result
+        st.session_state.judge_audio_bytes = audio_bytes
+        st.session_state.judge_autoplay_pending = True
+        st.session_state.judge_signature = current_signature
+        st.rerun()
+    except Exception as exc:
+        st.error("判定できませんでした。もう一度試してください。")
+        with st.expander("保護者向け詳細"):
+            st.code(str(exc))
+
+if st.session_state.judge_result:
+    result = st.session_state.judge_result
+    st.markdown(
+        f"""
+        <div class="judge-card">
+          <div class="small-note">今回の1位</div>
+          <div class="judge-winner">🏆 {result['winner_name']}</div>
+          <div class="answer-main">「{result['winner_answer']}」</div>
+          <br>
+          <div><b>理由：</b>{result['reason']}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.session_state.judge_audio_bytes:
+        st.audio(
+            st.session_state.judge_audio_bytes,
+            format="audio/wav",
+            autoplay=bool(st.session_state.judge_autoplay_pending),
+        )
+        st.session_state.judge_autoplay_pending = False
 
 
 st.divider()
