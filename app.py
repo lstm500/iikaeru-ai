@@ -604,8 +604,7 @@ def player_answers(topic, style):
         "additionalProperties": False,
     }
 
-    return ask_json(
-        f"""
+    base_prompt = f"""
 あなたは、5〜6歳の子どもと父母が遊ぶカードゲーム「言いカエル」の4人目のプレイヤーです。
 今回のお題を、指定された言い方に言い換えます。
 
@@ -630,7 +629,10 @@ def player_answers(topic, style):
 - 子ども向けの笑いは、①予想外の組み合わせ、②少し大げさ、③音やリズムの面白さ、④頭に浮かぶ変な光景、⑤意外な逆転、のうち少なくとも1つを使う。
 - ただし意味不明なランダム語、悪口、容姿いじり、下品すぎる表現にはしない。
 - 「すごい○○」「○○名人」「○○ヒーロー」のような無難な名付けだけで終わらせない。使うなら、具体的で意外な修飾を足して一段ひねる。
-- 出力前に3回答それぞれを内部で確認し、①短いか、②『{style}』らしさが一発で分かるか、③5〜6歳が絵を想像できるか、④少し笑える意外性があるか、のどれかが弱ければ作り直してから出力する。
+- お題カードの文言「{topic}」を answer にそのまま書いてはいけない。お題を言い直すのではなく、別の言葉・比喩・呼び名・情景に変換する。
+- 特にお題が1語の場合も、その1語をそのまま answer に再使用しない。例：お題が「旅行」なら answer に「旅行」と書かず、旅立ち・冒険・飛び出す情景など別表現へ変換する。
+- why ではお題を説明のために使ってもよいが、answer は必ず「お題そのものを言わない言い換え」にする。
+- 出力前に3回答それぞれを内部で確認し、①短いか、②『{style}』らしさが一発で分かるか、③5〜6歳が絵を想像できるか、④少し笑える意外性があるか、⑤お題カードの文言「{topic}」をそのまま使っていないか、のどれかが弱ければ作り直してから出力する。
 
 必ず次の3方向で、互いに違う回答を1つずつ作ってください。
 
@@ -688,11 +690,40 @@ def player_answers(topic, style):
 - why は子ども向けに1文で「どこが言い方カードに合っていて、どこが面白いか」が分かるようにする。
 - new_word は、その回答に少し新しい語彙が含まれる場合だけ1語。不要なら空文字。
 - new_word_meaning は new_word が空なら空文字。ある場合は子ども向けに非常に短く説明する。
-""".strip(),
-        "player_answers",
-        schema,
-        max_output_tokens=700,
-    )
+""".strip()
+
+    def topic_is_reused(answer):
+        answer_text = str(answer or "").replace(" ", "").replace("　", "")
+        topic_text = str(topic or "").replace(" ", "").replace("　", "")
+        return bool(topic_text and topic_text in answer_text)
+
+    last_result = None
+    for attempt in range(3):
+        retry_note = ""
+        if attempt > 0:
+            retry_note = (
+                "\n\n【作り直し指示】\n"
+                f"前の回答には、お題カードの文言『{topic}』がそのまま含まれていました。"
+                "answerではその文言を一切使わず、別の言葉・比喩・情景・呼び名に置き換えてください。"
+            )
+
+        result = ask_json(
+            base_prompt + retry_note,
+            "player_answers",
+            schema,
+            max_output_tokens=700,
+        )
+        last_result = result
+
+        answers = [
+            result.get("metaphor", {}).get("answer", ""),
+            result.get("nickname", {}).get("answer", ""),
+            result.get("twist", {}).get("answer", ""),
+        ]
+        if not any(topic_is_reused(answer) for answer in answers):
+            return result
+
+    raise ValueError("お題カードの文言を使わない回答を作れませんでした。もう一度AIの回答を生成してください。")
 
 
 def player_speech_text(answers):
