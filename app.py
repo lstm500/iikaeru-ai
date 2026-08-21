@@ -8,6 +8,7 @@ import wave
 import audioop
 import hashlib
 import random
+import base64
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -132,6 +133,7 @@ TEXT_MODEL = secret("TEXT_MODEL", "gpt-5.6-luna")
 TRANSCRIBE_MODEL = secret("TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
 TTS_MODEL = secret("TTS_MODEL", "gpt-4o-mini-tts")
 TTS_VOICE = secret("TTS_VOICE", "coral")
+IMAGE_MODEL = secret("IMAGE_MODEL", "gpt-image-2")
 FAMILY_PIN = str(secret("FAMILY_PIN", "")).strip()
 APP_TIMEZONE = secret("APP_TIMEZONE", "Asia/Tokyo")
 SUPABASE_URL = secret("SUPABASE_URL", "")
@@ -359,6 +361,43 @@ def speech_bytes(text):
                 os.remove(temp_path)
             except OSError:
                 pass
+
+
+def generate_player_image(topic, style, label, answer, why):
+    prompt = f"""
+Create one square illustration for a Japanese family word-play card game.
+The viewer is a 5- to 6-year-old child.
+
+Topic card: {topic}
+Style card: {style}
+AI answer type: {label}
+AI phrase: {answer}
+Why it works: {why}
+
+Requirements:
+- Make the AI phrase immediately understandable as a funny visual scene.
+- Strongly reflect the mood/form of the style card: {style}.
+- Keep the humor playful, surprising, and easy for a young child to understand.
+- Use a cute, friendly, colorful picture-book illustration style.
+- If the style is scary, sarcastic, harsh, or sad, keep it child-safe and gentle rather than disturbing or cruel.
+- Do not mock body shape, appearance, disability, race, gender, or other personal traits.
+- Do not use copyrighted characters, brand mascots, logos, or recognizable franchises.
+- Do not put words, captions, speech bubbles, letters, numbers, or logos in the image.
+- One clear main scene, simple composition, easy to recognize on a phone screen.
+""".strip()
+
+    result = openai_client().images.generate(
+        model=IMAGE_MODEL,
+        prompt=prompt,
+        size="1024x1024",
+        quality="low",
+    )
+    if not result.data:
+        raise ValueError("画像データが返りませんでした。")
+    encoded = getattr(result.data[0], "b64_json", None)
+    if not encoded:
+        raise ValueError("画像データを読み取れませんでした。")
+    return base64.b64decode(encoded)
 
 
 def card_candidates(raw_text, card_type):
@@ -828,6 +867,7 @@ DEFAULTS = {
     "ai_revealed": False,
     "ai_audio": None,
     "ai_audio_autoplay_pending": False,
+    "ai_images": {},
     "support_open": False,
     "support_request": "",
     "support_level": 0,
@@ -1144,7 +1184,7 @@ def render_support_result():
             )
 
 
-def render_player_answers(answers):
+def render_player_answers(answers, allow_image_generation=False):
     labels = [
         ("metaphor", "たとえカエル", "frog-yellow"),
         ("nickname", "なまえカエル", "frog-blue"),
@@ -1167,6 +1207,41 @@ def render_player_answers(answers):
         )
         if item.get("new_word"):
             st.caption(f"ことばメモ：{item['new_word']} ＝ {item['new_word_meaning']}")
+
+        if allow_image_generation:
+            images = st.session_state.get("ai_images", {})
+            existing = images.get(key)
+            button_label = "🎨 この答えを絵にする" if not existing else "🎨 もう一度絵にする"
+            if st.button(
+                button_label,
+                use_container_width=True,
+                key=f"ai_image_{st.session_state.round_serial}_{key}",
+            ):
+                try:
+                    with st.spinner("絵を作っています…"):
+                        image_bytes = generate_player_image(
+                            st.session_state.topic,
+                            st.session_state.style,
+                            label,
+                            item["answer"],
+                            item["why"],
+                        )
+                    updated = dict(st.session_state.get("ai_images", {}))
+                    updated[key] = image_bytes
+                    st.session_state.ai_images = updated
+                    st.rerun()
+                except Exception as exc:
+                    st.error("絵を作れませんでした。もう一度試してください。")
+                    with st.expander("保護者向け詳細"):
+                        st.code(str(exc))
+
+            existing = st.session_state.get("ai_images", {}).get(key)
+            if existing:
+                st.image(
+                    existing,
+                    caption=f"{label}：{item['answer']}",
+                    use_container_width=True,
+                )
 
 
 # ============================================================
@@ -1506,7 +1581,7 @@ else:
                 with st.expander("保護者向け詳細"):
                     st.code(str(exc))
     else:
-        render_player_answers(st.session_state.ai_answers)
+        render_player_answers(st.session_state.ai_answers, allow_image_generation=True)
         if not st.session_state.ai_audio:
             if st.button("🔊 AIの答えを聞く", use_container_width=True):
                 try:
