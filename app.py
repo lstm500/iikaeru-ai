@@ -7,6 +7,7 @@ import hmac
 import wave
 import audioop
 import hashlib
+import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -595,24 +596,47 @@ def player_speech_text(answers):
     )
 
 
+def is_meaningful_judge_answer(answer):
+    """Exclude only obvious non-answers; keep ordinary weak/short answers eligible."""
+    raw = str(answer or "").strip()
+    compact = "".join(ch for ch in raw if ch not in " 　、。,.!?！？…・〜ー~")
+    if len(compact) < 2:
+        return False
+
+    lowered = compact.lower()
+    non_answers = [
+        "わからない", "分からない", "わかんない", "わかりません",
+        "思いつかない", "おもいつかない", "思いつきません",
+        "ありません", "ないです", "なし", "無回答", "パス",
+        "むり", "無理", "知らない", "しらない",
+    ]
+    return not any(phrase in lowered for phrase in non_answers)
+
+
 def judge_answers(topic, style, players):
-    ids = [p["id"] for p in players]
+    eligible = [p for p in players if is_meaningful_judge_answer(p.get("answer", ""))]
+    if not eligible:
+        raise ValueError("判定できる回答がありません。『わからない』『パス』以外の回答を1つ以上入れてください。")
+
+    # Game-first judging: once obvious non-answers are removed, everyone has
+    # essentially the same chance to win. This avoids adults or elaborate
+    # vocabulary winning too consistently in family play.
+    winner = random.SystemRandom().choice(eligible)
+
     schema = {
         "type": "object",
         "properties": {
-            "winner_id": {"type": "string", "enum": ids},
             "reason": {"type": "string"},
         },
-        "required": ["winner_id", "reason"],
+        "required": ["reason"],
         "additionalProperties": False,
     }
-    answer_lines = "\n".join(
-        f"{p['id']} / {p['name']}：{p['answer']}" for p in players
-    )
     result = ask_json(
         f"""
 あなたは、家族で遊ぶカードゲーム『言いカエル』の審判です。
-複数人の回答から、今回いちばん良い回答を必ず1つ選んでください。点数は付けません。
+今回はゲームとして1位の人はすでに抽選で決まっています。
+あなたの役目は、その回答の良いところを見つけて、子どもにも分かる理由を1文で説明することだけです。
+順位を選び直したり、他の回答と比較したりしないでください。
 
 【お題カード】
 {topic}
@@ -620,35 +644,31 @@ def judge_answers(topic, style, players):
 【言い方カード】
 {style}
 
-【みんなの回答】
-{answer_lines}
+【今回1位になった人】
+{winner['name']}
 
-【判断基準】
-1. お題を保ちながら、指定された『言い方』にきちんと変えられている。
-2. 発想に少し意外さや面白さがある。
-3. 聞いたときに意味や場面を想像しやすい。
-4. 家族で聞いて楽しめる。
+【今回1位になった回答】
+{winner['answer']}
 
-【公平にするルール】
-- 長い回答、難しい言葉、大人っぽい言葉だから高評価にはしない。
-- 子どもか大人かを推測して加点・減点しない。
-- 人を傷つける表現や差別的な表現は評価しない。
-- 僅差でも同点にせず、今回の1位を1つ選ぶ。
-- reason は子どもにも分かる短い1文にし、『〜からです。』で終える。
-- reason では他の人をけなさず、1位の回答の良かった点だけを説明する。
+【理由の作り方】
+- 指定された『言い方』とのつながり、発想の面白さ、イメージしやすさなどから、実際に当てはまる良い点を1つ見つける。
+- 無理に大げさに褒めない。
+- 他の人の回答には触れない。
+- 難しい言葉は使わない。
+- 1文だけにする。
+- 『〜からです。』で終える。
 """.strip(),
-        "judge_answers",
+        "judge_reason",
         schema,
-        max_output_tokens=320,
+        max_output_tokens=180,
     )
 
-    winner_id = result["winner_id"]
-    winner = next(p for p in players if p["id"] == winner_id)
     return {
-        "winner_id": winner_id,
+        "winner_id": winner["id"],
         "winner_name": winner["name"],
         "winner_answer": winner["answer"],
         "reason": result["reason"],
+        "eligible_count": len(eligible),
     }
 
 
@@ -1268,8 +1288,108 @@ else:
 st.divider()
 
 
+# -------------------- Judging mode --------------------
+st.subheader("② AI審判・採点モード")
+st.caption("明らかな無回答を除き、残った回答からランダム性を強めて今回の1位を決めます。AIは選ばれた回答の良かった理由を説明します。点数は付けません。")
+
+serial = st.session_state.round_serial
+player_count = st.selectbox(
+    "人間の参加人数",
+    [2, 3, 4, 5],
+    index=1,
+    key=f"score_player_count_{serial}",
+)
+
+default_names = ["こども", "お父さん", "お母さん", "プレイヤー4", "プレイヤー5"]
+players = []
+for i in range(int(player_count)):
+    name_key = f"score_name_{serial}_{i}"
+    if name_key not in st.session_state:
+        st.session_state[name_key] = default_names[i]
+    name = st.text_input(
+        f"{i + 1}人目の名前",
+        key=name_key,
+    ).strip() or f"プレイヤー{i + 1}"
+    answer = voice_capture_player_answer(
+        serial, i, name, st.session_state.topic, st.session_state.style
+    )
+    players.append({"id": f"P{i + 1}", "name": name, "answer": answer})
+
+ready = all(p["answer"] for p in players)
+current_signature = hashlib.sha1(
+    json.dumps(
+        {
+            "topic": st.session_state.topic,
+            "style": st.session_state.style,
+            "players": players,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+).hexdigest()
+
+if st.session_state.judge_result and st.session_state.judge_signature != current_signature:
+    st.session_state.judge_result = None
+    st.session_state.judge_audio_bytes = None
+    st.session_state.judge_autoplay_pending = False
+    st.session_state.judge_signature = ""
+
+if not ready:
+    st.caption("全員の回答が入ると判定できます。")
+
+if st.button(
+    "🏆 AIに今回の1位を決めてもらう",
+    type="primary",
+    use_container_width=True,
+    disabled=not ready,
+):
+    try:
+        with st.spinner("みんなの答えを比べています…"):
+            result = judge_answers(
+                st.session_state.topic,
+                st.session_state.style,
+                players,
+            )
+            audio_bytes = speech_bytes(judge_speech_text(result))
+        st.session_state.judge_result = result
+        st.session_state.judge_audio_bytes = audio_bytes
+        st.session_state.judge_autoplay_pending = True
+        st.session_state.judge_signature = current_signature
+        st.rerun()
+    except ValueError as exc:
+        st.warning(str(exc))
+    except Exception as exc:
+        st.error("判定できませんでした。もう一度試してください。")
+        with st.expander("保護者向け詳細"):
+            st.code(str(exc))
+
+if st.session_state.judge_result:
+    result = st.session_state.judge_result
+    st.markdown(
+        f"""
+        <div class="judge-card">
+          <div class="small-note">今回の1位</div>
+          <div class="judge-winner">🏆 {result['winner_name']}</div>
+          <div class="answer-main">「{result['winner_answer']}」</div>
+          <br>
+          <div><b>理由：</b>{result['reason']}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.session_state.judge_audio_bytes:
+        st.audio(
+            st.session_state.judge_audio_bytes,
+            format="audio/wav",
+            autoplay=bool(st.session_state.judge_autoplay_pending),
+        )
+        st.session_state.judge_autoplay_pending = False
+
+
+st.divider()
+
 # -------------------- AI player mode --------------------
-st.subheader("② AIもゲームに参加")
+st.subheader("③ AIもゲームに参加")
 st.caption("AIは『たとえ・なまえ・ぎゃくてん』の3方向で答えます。")
 
 if not st.session_state.ai_joined:
@@ -1336,104 +1456,6 @@ else:
                 autoplay=bool(st.session_state.ai_audio_autoplay_pending),
             )
             st.session_state.ai_audio_autoplay_pending = False
-
-
-st.divider()
-
-# -------------------- Judging mode --------------------
-st.subheader("③ AI審判・採点モード")
-st.caption("みんなが順番に答えたあと、AIが今回いちばん良い回答を1つ選び、理由を説明します。点数は付けません。")
-
-serial = st.session_state.round_serial
-player_count = st.selectbox(
-    "人間の参加人数",
-    [2, 3, 4, 5],
-    index=1,
-    key=f"score_player_count_{serial}",
-)
-
-default_names = ["こども", "お父さん", "お母さん", "プレイヤー4", "プレイヤー5"]
-players = []
-for i in range(int(player_count)):
-    name_key = f"score_name_{serial}_{i}"
-    if name_key not in st.session_state:
-        st.session_state[name_key] = default_names[i]
-    name = st.text_input(
-        f"{i + 1}人目の名前",
-        key=name_key,
-    ).strip() or f"プレイヤー{i + 1}"
-    answer = voice_capture_player_answer(
-        serial, i, name, st.session_state.topic, st.session_state.style
-    )
-    players.append({"id": f"P{i + 1}", "name": name, "answer": answer})
-
-ready = all(p["answer"] for p in players)
-current_signature = hashlib.sha1(
-    json.dumps(
-        {
-            "topic": st.session_state.topic,
-            "style": st.session_state.style,
-            "players": players,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    ).encode("utf-8")
-).hexdigest()
-
-if st.session_state.judge_result and st.session_state.judge_signature != current_signature:
-    st.session_state.judge_result = None
-    st.session_state.judge_audio_bytes = None
-    st.session_state.judge_autoplay_pending = False
-    st.session_state.judge_signature = ""
-
-if not ready:
-    st.caption("全員の回答が入ると判定できます。")
-
-if st.button(
-    "🏆 AIに今回の1位を決めてもらう",
-    type="primary",
-    use_container_width=True,
-    disabled=not ready,
-):
-    try:
-        with st.spinner("みんなの答えを比べています…"):
-            result = judge_answers(
-                st.session_state.topic,
-                st.session_state.style,
-                players,
-            )
-            audio_bytes = speech_bytes(judge_speech_text(result))
-        st.session_state.judge_result = result
-        st.session_state.judge_audio_bytes = audio_bytes
-        st.session_state.judge_autoplay_pending = True
-        st.session_state.judge_signature = current_signature
-        st.rerun()
-    except Exception as exc:
-        st.error("判定できませんでした。もう一度試してください。")
-        with st.expander("保護者向け詳細"):
-            st.code(str(exc))
-
-if st.session_state.judge_result:
-    result = st.session_state.judge_result
-    st.markdown(
-        f"""
-        <div class="judge-card">
-          <div class="small-note">今回の1位</div>
-          <div class="judge-winner">🏆 {result['winner_name']}</div>
-          <div class="answer-main">「{result['winner_answer']}」</div>
-          <br>
-          <div><b>理由：</b>{result['reason']}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if st.session_state.judge_audio_bytes:
-        st.audio(
-            st.session_state.judge_audio_bytes,
-            format="audio/wav",
-            autoplay=bool(st.session_state.judge_autoplay_pending),
-        )
-        st.session_state.judge_autoplay_pending = False
 
 
 st.divider()
