@@ -723,15 +723,37 @@ def is_meaningful_judge_answer(answer):
     return not any(phrase in lowered for phrase in non_answers)
 
 
+def is_child_player_name(name):
+    """Return True for ordinary labels used for a child player in family play."""
+    normalized = str(name or "").strip().lower().replace(" ", "").replace("　", "")
+    child_markers = [
+        "こども", "子ども", "子供", "お子さん", "おこさん",
+        "息子", "むすこ", "娘", "むすめ", "キッズ", "kid", "child",
+    ]
+    return any(marker.lower() in normalized for marker in child_markers)
+
+
 def judge_answers(topic, style, players):
     eligible = [p for p in players if is_meaningful_judge_answer(p.get("answer", ""))]
     if not eligible:
         raise ValueError("判定できる回答がありません。『わからない』『パス』以外の回答を1つ以上入れてください。")
 
-    # Game-first judging: once obvious non-answers are removed, everyone has
-    # essentially the same chance to win. This avoids adults or elaborate
-    # vocabulary winning too consistently in family play.
-    winner = random.SystemRandom().choice(eligible)
+    # Family-play weighting:
+    # - If a child has a meaningful answer, the child side wins about 50% of rounds.
+    # - The remaining ~50% is chosen randomly from the other meaningful answers.
+    # - With multiple children, the 50% child share is split randomly among them.
+    # - Obvious non-answers never receive the child weighting.
+    rng = random.SystemRandom()
+    child_eligible = [p for p in eligible if is_child_player_name(p.get("name", ""))]
+    other_eligible = [p for p in eligible if p not in child_eligible]
+
+    if child_eligible and other_eligible:
+        if rng.random() < 0.5:
+            winner = rng.choice(child_eligible)
+        else:
+            winner = rng.choice(other_eligible)
+    else:
+        winner = rng.choice(eligible)
 
     schema = {
         "type": "object",
@@ -1436,7 +1458,7 @@ st.divider()
 
 # -------------------- Judging mode --------------------
 st.subheader("② AI審判・採点モード")
-st.caption("明らかな無回答を除き、残った回答からランダム性を強めて今回の1位を決めます。AIは選ばれた回答の良かった理由を説明します。点数は付けません。")
+st.caption("明らかな無回答を除いて判定します。子どもが有効な回答をしている回は、子どもが約50%の確率で1位になります。残りはほかの参加者からランダムに選び、AIが良かった理由を説明します。点数は付けません。")
 
 serial = st.session_state.round_serial
 player_count = st.selectbox(
