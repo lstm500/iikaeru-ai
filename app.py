@@ -138,15 +138,14 @@ FAMILY_PIN = str(secret("FAMILY_PIN", "")).strip()
 APP_TIMEZONE = secret("APP_TIMEZONE", "Asia/Tokyo")
 SUPABASE_URL = secret("SUPABASE_URL", "")
 SUPABASE_SECRET_KEY = secret("SUPABASE_SECRET_KEY", "")
+CARD_TABLE = secret("CARD_TABLE", "iikaeru_cards")
 USE_FAST_MODE = str(secret("USE_FAST_MODE", "true")).lower() in {"1", "true", "yes", "on"}
 
 
 # ============================================================
-# Card master (from the family-made list)
+# Card master is stored privately in Supabase.
+# No card text is embedded in this public GitHub source.
 # ============================================================
-TOPIC_CARDS = ['ゲーマー', '老後', 'ボランティア', '料理教室', '釣り', '旅行', 'ゲーム', '読書', '音楽', 'スポーツ観戦', 'パーティー', '会議', '面接', 'テスト', '夏休み', 'お正月', 'クリスマス', '誕生日', '葬式', '結婚式', 'デート', '通学', '買い物', '掃除', '料理', '植物', 'ペット', '隣人', '部下', '上司', 'ライバル', '後輩', '先輩', '親友', '家族', '努力家', '天才', 'ベジタリアン', '夜型の人', '早起きの人', 'コレクター', '受験生', 'アルバイト', '社長', 'ユーチューバー', 'アーティスト', 'プログラマー', '宇宙飛行士', '警察官', '医者', '教師', '学生', '主婦', '芸能人', 'スマートフォン', 'お金持ち', '自動車', '恋人', '痩せている人', '太っている人', 'ANY（出題者がお題を考えます）']
-STYLE_CARDS = ['皮肉たっぷりに', '回りくどく', '映画・ドラマのセリフ風に', '歌の歌詞風に', '漫画・アニメ・ゲームに例えて', '動物に例えて', '可愛く', '子どもっぽく', '超前向きな言葉で', '四字熟語で', 'ストレートに', '怖い感じに', 'ギャル風に', '詩的に', '古風に', 'ファンタジー風に', '悲しい雰囲気で', 'カッコよく', '辛辣に', 'やさしく']
-ANY_TOPIC_CARD = "ANY（出題者がお題を考えます）"
 
 
 # ============================================================
@@ -164,6 +163,60 @@ def supabase_client():
     return create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_card_rows():
+    """Load the private card master with a server-side Supabase secret key."""
+    client = supabase_client()
+    if client is None:
+        return []
+
+    result = (
+        client
+        .table(CARD_TABLE)
+        .select("card_type,card_text,is_free_topic,sort_order,ai_instruction")
+        .eq("is_active", True)
+        .order("card_type")
+        .order("sort_order")
+        .execute()
+    )
+
+    cleaned = []
+    for row in result.data or []:
+        card_type = str(row.get("card_type", "")).strip()
+        card_text = str(row.get("card_text", "")).strip()
+        if card_type not in {"topic", "style"} or not card_text:
+            continue
+        cleaned.append(
+            {
+                "card_type": card_type,
+                "card_text": card_text,
+                "is_free_topic": bool(row.get("is_free_topic", False)),
+                "sort_order": int(row.get("sort_order") or 0),
+                "ai_instruction": str(row.get("ai_instruction") or "").strip(),
+            }
+        )
+    return cleaned
+
+
+def allowed_cards(card_type):
+    target = "topic" if card_type == "topic" else "style"
+    return [
+        row["card_text"]
+        for row in load_card_rows()
+        if row["card_type"] == target
+    ]
+
+
+def is_free_topic_card(card_text):
+    target = str(card_text or "").strip()
+    return any(
+        row["card_type"] == "topic"
+        and row["card_text"] == target
+        and row["is_free_topic"]
+        for row in load_card_rows()
+    )
+
+
 def history_enabled():
     return bool(create_client and SUPABASE_URL and SUPABASE_SECRET_KEY)
 
@@ -171,6 +224,35 @@ def history_enabled():
 def verify_setup():
     if not OPENAI_API_KEY:
         st.error("OPENAI_API_KEY が設定されていません。Streamlit の Secrets を確認してください。")
+        st.stop()
+
+    if create_client is None:
+        st.error("Supabase ライブラリがありません。requirements.txt に supabase を追加してください。")
+        st.stop()
+
+    if not (SUPABASE_URL and SUPABASE_SECRET_KEY):
+        st.error(
+            "カード一覧は非公開Supabaseから読み込みます。Streamlit Secrets に "
+            "SUPABASE_URL と SUPABASE_SECRET_KEY を設定してください。"
+        )
+        st.stop()
+
+    try:
+        topics = allowed_cards("topic")
+        styles = allowed_cards("style")
+    except Exception as exc:
+        st.error(
+            "Supabase の非公開カード一覧を読み込めませんでした。"
+            "テーブル設定とSecret Keyを確認してください。"
+        )
+        with st.expander("保護者向け詳細"):
+            st.code(str(exc))
+        st.stop()
+
+    if not topics or not styles:
+        st.error(
+            "Supabase のカード一覧が空です。お題カードと言い方カードを登録してください。"
+        )
         st.stop()
 
 
@@ -259,10 +341,6 @@ def transcribe_audio(audio_file, context=""):
         prompt=prompt,
     )
     return result.text.strip()
-
-
-def allowed_cards(card_type):
-    return TOPIC_CARDS if card_type == "topic" else STYLE_CARDS
 
 
 def transcribe_card_audio(audio_file, card_type):
@@ -555,29 +633,14 @@ def support_answer(topic, style, child_request, level, previous_message=""):
 
 
 def player_style_instruction(style):
-    rules = {
-        "皮肉たっぷりに": "表面ではほめているように聞こえるが、少しだけ反対の意味がにじむ言い方にする。子ども同士で傷つける悪口にはしない。",
-        "回りくどく": "結論をすぐ言わず、前置きや遠回りを入れてから意味が伝わる言い方にする。短すぎてストレートにならないようにする。",
-        "映画・ドラマのセリフ風に": "登場人物が場面の中で実際に口にしそうなセリフにする。『〜だ』『〜なのか』『行こう』など、声に出して演じられる形を優先する。",
-        "歌の歌詞風に": "リズムや繰り返し、情景のある言葉を使い、歌に乗せられそうな一節にする。説明文にはしない。",
-        "漫画・アニメ・ゲームに例えて": "漫画・アニメ・ゲームの世界にありそうな役、技、アイテム、イベントなどにたとえる。作品固有名を無理に使わず、子どもが絵を想像できる言い方にする。",
-        "動物に例えて": "必ず動物そのもの、または動物の動き・特徴を使ってたとえる。動物が出てこない回答は禁止。",
-        "可愛く": "語感、擬音、小ささ、丸さ、やわらかさなどを使い、聞いた瞬間に『かわいい』と感じる言い方にする。",
-        "子どもっぽく": "5〜6歳の子どもが実際に言いそうな、短く素朴で具体的な言葉にする。大人っぽい熟語や抽象表現は避ける。",
-        "超前向きな言葉で": "必ず明るい長所・チャンス・楽しみとして言い換える。否定的な語感を残さない。",
-        "四字熟語で": "回答そのものを原則として漢字4文字の四字熟語にする。既存の四字熟語を優先し、難しすぎる場合は子どもにも説明できるものを選ぶ。",
-        "ストレートに": "遠回しにせず、一言で意味がはっきり伝わる直接的な表現にする。比喩を使う場合も意味がすぐ分かるものにする。",
-        "怖い感じに": "怪物、闇、危機、ぞくっとする音などを使い、少し怖い雰囲気がはっきり出る言い方にする。ただし残酷な描写はしない。",
-        "ギャル風に": "明るくテンポよく、現代のくだけた若者口調にする。『マジ』『めっちゃ』『〜じゃん』などは使ってよいが、難しいネットスラングにはしない。",
-        "詩的に": "情景、光、風、季節、色、音などを使い、説明ではなく少し余韻のある表現にする。",
-        "古風に": "現代の普通の言い方を避け、『〜でござる』『〜なり』『いざ』『〜じゃ』など昔風の響きを明確に入れる。",
-        "ファンタジー風に": "魔法、勇者、王国、竜、精霊、宝物、冒険など、幻想世界を連想できる要素を必ず入れる。",
-        "悲しい雰囲気で": "寂しさ、別れ、涙、静けさなどが感じられる言い方にする。暗すぎたり不安を強く煽ったりしない。",
-        "カッコよく": "強さ、速さ、頼もしさ、特別感が伝わる言い方にする。聞いた瞬間にヒーローや達人のような印象が出ることを優先する。",
-        "辛辣に": "少し鋭く、遠慮のないツッコミ調にする。ただし人そのものを傷つける悪口や容姿いじりにはしない。",
-        "やさしく": "やわらかい語調で、安心・思いやり・温かさが伝わる言い方にする。強い否定や命令口調を避ける。",
-    }
-    return rules.get(style, "言い方カードの語感・形式・雰囲気が、回答だけを聞いても明確に伝わるようにする。")
+    """Load style-specific AI guidance from the private Supabase card master."""
+    target = str(style or "").strip()
+    for row in load_card_rows():
+        if row["card_type"] == "style" and row["card_text"] == target:
+            instruction = str(row.get("ai_instruction") or "").strip()
+            if instruction:
+                return instruction
+    return "言い方カードの語感・形式・雰囲気が、回答だけを聞いても明確に伝わるようにする。"
 
 
 def player_answers(topic, style):
@@ -630,7 +693,7 @@ def player_answers(topic, style):
 - ただし意味不明なランダム語、悪口、容姿いじり、下品すぎる表現にはしない。
 - 「すごい○○」「○○名人」「○○ヒーロー」のような無難な名付けだけで終わらせない。使うなら、具体的で意外な修飾を足して一段ひねる。
 - お題カードの文言「{topic}」を answer にそのまま書いてはいけない。お題を言い直すのではなく、別の言葉・比喩・呼び名・情景に変換する。
-- 特にお題が1語の場合も、その1語をそのまま answer に再使用しない。例：お題が「旅行」なら answer に「旅行」と書かず、旅立ち・冒険・飛び出す情景など別表現へ変換する。
+- 特にお題が1語の場合も、その1語をそのまま answer に再使用せず、別の言葉・比喩・動き・情景へ変換する。
 - why ではお題を説明のために使ってもよいが、answer は必ず「お題そのものを言わない言い換え」にする。
 - 出力前に3回答それぞれを内部で確認し、①短いか、②『{style}』らしさが一発で分かるか、③5〜6歳が絵を想像できるか、④少し笑える意外性があるか、⑤お題カードの文言「{topic}」をそのまま使っていないか、のどれかが弱ければ作り直してから出力する。
 
@@ -655,34 +718,20 @@ def player_answers(topic, style):
 4. 「そう来たか」と感じる小さな意外性があり、子どもが笑いやすい。
 5. お題とのつながりが自然で、意味が破綻していない。
 
-【短くても言い方カードを強く出すための型】
-- 皮肉たっぷりに：ほめる形なのに少し逆の意味がにじむ短い一言。
-- 回りくどく：短い前置き＋短い結論の2フレーズまで。
-- 映画・ドラマのセリフ風に：その場で人物が叫ぶ・つぶやく短いセリフ。
-- 歌の歌詞風に：リズム、反復、擬音などで短い歌詞の一節。
-- 漫画・アニメ・ゲームに例えて：「必殺！」「レベル○○」「伝説のアイテム」など世界観が一発で出る型。
-- 動物に例えて：answer内に具体的な動物名を必ず出す。
-- 可愛く：擬音、語尾、小ささ、丸さなどをanswer内に出す。
-- 子どもっぽく：短く素朴に。「○○だー！」「めっちゃ○○！」のような勢いも可。
-- 超前向きな言葉で：「チャンス」「ラッキー」「最高」など明るい転換をanswer内に出す。
-- 四字熟語で：原則、answerは漢字4文字そのもの。
-- ストレートに：一発で意味が分かる短い断言。
-- 怖い感じに：「闇」「怪物」「ぞくっ」「来る…」など怖さがanswer内に出る。
-- ギャル風に：「マジ」「めっちゃ」「〜じゃん」など口調をanswer内に出す。
-- 詩的に：光、風、月、雨、色、音などの具体的な情景を短く置く。
-- 古風に：「いざ」「〜なり」「〜でござる」「〜じゃ」などをanswer内に出す。
-- ファンタジー風に：魔法、勇者、竜、精霊、王国などをanswer内に出す。
-- 悲しい雰囲気で：涙、さよなら、ひとり、しょんぼり等の寂しさをanswer内に出す。
-- カッコよく：必殺技・異名・強い動きのような切れ味を出す。
-- 辛辣に：短いツッコミとして鋭く。ただし人格攻撃にはしない。
-- やさしく：安心できる短い言葉、柔らかな語尾をanswer内に出す。
+【短くても言い方カードを強く出す方法】
+- 上の「この言い方カードで必ず守ること」を最優先する。
+- 語尾、語彙、リズム、文の形、世界観のうち、今回のカードらしさが最も出る要素をanswerそのものに入れる。
+- 具体的な対象へのたとえを求めるカードなら、answerに具体的な対象を必ず登場させる。
+- セリフ・歌・詩・口調など形式を求めるカードなら、説明ではなくanswer自体をその形式にする。
+- 感情や雰囲気を求めるカードなら、その雰囲気が一言で伝わる具体語や情景を入れる。
+- ただカード名を言い直すのではなく、実際の表現としてその特徴を見せる。
 
 【ルール】
 - 3回答は発想を重複させない。3つとも同じ「○○名人」「○○ヒーロー」型にしない。
 - answer は説明を含めない。説明は why に分離する。
 - answer は原則1フレーズ、最大2フレーズ。1〜2文の長文にはしない。
-- 「回りくどく」でも短い2フレーズ内で回りくどさを表現する。
-- 「映画・ドラマのセリフ風に」「歌の歌詞風に」「詩的に」でも一息〜二息の短さを守る。
+- どの言い方カードでも、カードらしさを保ったまま短い1〜2フレーズに収める。
+- 形式を求めるカードでも、一息〜二息で伝わる短さを守る。
 - 難解な熟語、抽象語、難しいネットスラング、大人しか分からない皮肉は避ける。
 - ダジャレだけに頼らないが、音の面白さが自然なら使ってよい。
 - 人を傷つける、容姿をばかにする、差別的な表現は避ける。
@@ -1336,7 +1385,7 @@ if page == "これまで":
 
 if not st.session_state.round_active:
     st.subheader("カードをセット")
-    st.caption("登録済みのカード一覧から、声の音に近い実在カードだけを候補表示します。実物と同じ言葉を選んでください。")
+    st.caption("非公開のカード一覧から、声の音に近い実在カードだけを候補表示します。実物と同じ言葉を選んでください。")
 
     base_context = "カードゲーム『言いカエル』のカードを読み上げています。短い語句として、聞こえた音をできるだけそのまま文字起こししてください。"
     topic = voice_select_card(
@@ -1353,7 +1402,7 @@ if not st.session_state.round_active:
         card_type="style",
         context=base_context + " 今は言い方カードです。",
     )
-    if topic == ANY_TOPIC_CARD:
+    if is_free_topic_card(topic):
         topic = st.text_input(
             "ANYのお題",
             placeholder="出題者が考えた今回のお題",
