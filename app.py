@@ -633,6 +633,92 @@ def support_answer(topic, style, child_request, level, previous_message=""):
     )
 
 
+def explain_topic_for_child(topic):
+    """Explain only the topic card in simple Japanese without giving a game answer."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "meaning": {"type": "string"},
+            "example": {"type": "string"},
+        },
+        "required": ["meaning", "example"],
+        "additionalProperties": False,
+    }
+
+    base_prompt = f"""
+あなたは、5〜6歳の子どもにカードゲーム「言いカエル」のお題の意味だけを説明する先生役です。
+
+【今回のお題】
+{topic}
+
+【目的】
+子どもが「このお題は、どんなもの・人・場面のことなのか」を頭に絵として思い浮かべられるようにしてください。
+ここではゲームの答えや言い換えを考えてはいけません。お題の意味を理解するための説明だけをします。
+
+【ルール】
+- 5〜6歳に話しかける自然な日本語にする。
+- meaning は1〜2文。難しい言葉を使わず、まず意味を説明する。
+- example は1文。日常で想像しやすい具体的な場面を1つだけ出す。
+- 全体を音声で20秒前後で聞ける程度に短くする。
+- 「つまり」「たとえば」を使ってもよい。
+- 言い方カードには触れない。
+- 言い換えの完成例、ヒント、面白い答え、勝ち方は出さない。
+- 子どもを評価したり褒めたりしない。
+- 日本語の漢字・ひらがな・カタカナ・数字・一般的な句読点だけを使う。
+- 外国語や日本語以外の文字体系、アルファベットを混ぜない。
+""".strip()
+
+    last_result = None
+    for attempt in range(3):
+        retry = ""
+        if attempt:
+            retry = (
+                "\n\n前の出力に日本語以外の表記が含まれていた可能性があります。"
+                "日本語表記だけで、より短く分かりやすく作り直してください。"
+            )
+        result = ask_json(
+            base_prompt + retry,
+            "topic_explanation",
+            schema,
+            max_output_tokens=350,
+        )
+        last_result = result
+        joined = f"{result.get('meaning', '')} {result.get('example', '')}"
+        if not non_japanese_letters(joined):
+            return result
+
+    return last_result or {"meaning": "", "example": ""}
+
+
+def topic_explanation_speech_text(item):
+    meaning = str((item or {}).get("meaning", "")).strip()
+    example = str((item or {}).get("example", "")).strip()
+    parts = []
+    if meaning:
+        parts.append(meaning)
+    if example:
+        parts.append(f"たとえば、{example}")
+    return " ".join(parts)
+
+
+def log_topic_explanation(item):
+    """Keep the existing per-round support history useful after simplifying the UI."""
+    message = topic_explanation_speech_text(item)
+    event = {
+        "request": "お題を解説して",
+        "level": 0,
+        "need_type": "topic_explanation",
+        "message": message,
+        "words": [],
+    }
+    st.session_state.support_log.append(event)
+    update_round_history(
+        st.session_state.round_id,
+        support_log=st.session_state.support_log,
+        learned_words=st.session_state.learned_words,
+    )
+
+
 def player_style_instruction(style):
     """Load style-specific AI guidance from the private Supabase card master."""
     target = str(style or "").strip()
@@ -1137,6 +1223,9 @@ DEFAULTS = {
     "reference_answer": None,
     "reference_audio": None,
     "reference_audio_autoplay_pending": False,
+    "topic_explanation": None,
+    "topic_explanation_audio": None,
+    "topic_explanation_autoplay_pending": False,
     "support_open": False,
     "support_request": "",
     "support_level": 0,
@@ -1567,7 +1656,7 @@ verify_setup()
 require_family_pin()
 
 st.title("🐸 言いカエル おたすけAI")
-st.caption("ヒント・参考回答・AI審判・AIプレイヤーの4つの使い方ができます。")
+st.caption("お題解説・参考回答・AI審判・AIプレイヤーの4つの使い方ができます。")
 st.caption("※ 読み上げ音声はAIが生成した音声です。")
 
 pages = ["あそぶ", "これまで"] if history_enabled() else ["あそぶ"]
@@ -1679,86 +1768,46 @@ st.markdown(
 
 # -------------------- Support mode --------------------
 st.subheader("① こまったときのサポート")
-st.caption("分からない言葉や、思いつかないところを声で聞けます。AIはまず答えを言わずに助けます。")
+st.caption("お題の意味が分からないときに使います。ボタンを押すだけで、子ども向けの短い解説が音声で流れます。ゲームの答えやヒントは出しません。")
 
-if not st.session_state.support_open:
-    if st.button("🐸 こまった！ たすけて", use_container_width=True):
-        st.session_state.support_open = True
+if st.button("🔊 お題を解説して！", use_container_width=True):
+    try:
+        with st.spinner("お題を分かりやすく説明しています…"):
+            item = explain_topic_for_child(st.session_state.topic)
+            audio_text = topic_explanation_speech_text(item)
+            if not audio_text:
+                raise ValueError("お題の解説が空でした。")
+            st.session_state.topic_explanation = item
+            st.session_state.topic_explanation_audio = speech_bytes(audio_text)
+            st.session_state.topic_explanation_autoplay_pending = True
+            log_topic_explanation(item)
         st.rerun()
-else:
-    if not st.session_state.support_request:
-        context = (
-            f"カードゲームの今回のお題は『{st.session_state.topic}』、"
-            f"言い方は『{st.session_state.style}』です。"
-        )
-        child_request = voice_review(
-            f"support_{st.session_state.round_serial}",
-            "なにで こまっているか話してね",
-            context,
-        )
-        if child_request is not None:
-            try:
-                with st.spinner("ヒントを考えています…"):
-                    result = support_answer(
-                        st.session_state.topic,
-                        st.session_state.style,
-                        child_request,
-                        level=1,
-                    )
-                    apply_support_result(child_request, 1, result)
-                st.rerun()
-            except Exception as exc:
-                st.error("ヒントを作れませんでした。もう一度試してください。")
-                with st.expander("保護者向け詳細"):
-                    st.code(str(exc))
-    else:
-        st.caption("聞いたこと：" + st.session_state.support_request)
-        render_support_result()
+    except Exception as exc:
+        st.error("お題を解説できませんでした。もう一度試してください。")
+        with st.expander("保護者向け詳細"):
+            st.code(str(exc))
 
-        c1, c2 = st.columns(2)
-        with c1:
-            more_disabled = st.session_state.support_level >= 4
-            if st.button(
-                "もう少しヒント",
-                use_container_width=True,
-                disabled=more_disabled,
-            ):
-                try:
-                    new_level = min(4, st.session_state.support_level + 1)
-                    previous = st.session_state.support_result.get("message", "")
-                    with st.spinner("もう一歩だけ助けます…"):
-                        result = support_answer(
-                            st.session_state.topic,
-                            st.session_state.style,
-                            st.session_state.support_request,
-                            level=new_level,
-                            previous_message=previous,
-                        )
-                        apply_support_result(
-                            st.session_state.support_request,
-                            new_level,
-                            result,
-                        )
-                    st.rerun()
-                except Exception as exc:
-                    st.error("ヒントを作れませんでした。もう一度試してください。")
-                    with st.expander("保護者向け詳細"):
-                        st.code(str(exc))
-        with c2:
-            if st.button("別のことを聞く", use_container_width=True):
-                st.session_state.support_request = ""
-                st.session_state.support_level = 0
-                st.session_state.support_result = None
-                st.session_state.support_audio = None
-                st.session_state.support_autoplay_pending = False
-                # Force a new recorder key.
-                old_key = f"take_support_{st.session_state.round_serial}"
-                st.session_state[old_key] = int(st.session_state.get(old_key, 0)) + 1
-                st.rerun()
+if st.session_state.topic_explanation:
+    item = st.session_state.topic_explanation
+    st.markdown(
+        f"""
+        <div class="support-card">
+          <b>お題のせつめい</b><br><br>
+          {item.get('meaning', '')}<br><br>
+          <b>たとえば</b><br>
+          {item.get('example', '')}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    if st.button("サポートを閉じる", use_container_width=True):
-        st.session_state.support_open = False
-        st.rerun()
+if st.session_state.topic_explanation_audio:
+    st.audio(
+        st.session_state.topic_explanation_audio,
+        format="audio/wav",
+        autoplay=bool(st.session_state.topic_explanation_autoplay_pending),
+    )
+    st.session_state.topic_explanation_autoplay_pending = False
 
 
 st.divider()
