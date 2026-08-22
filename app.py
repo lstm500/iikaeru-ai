@@ -23,7 +23,7 @@ except Exception:
 
 # ============================================================
 # Basic settings
-# v19: one pedagogical AI reference answer + random card draw + four-section layout.
+# v26: poetic-style answers use a strict topic-anchor -> shared-feature -> metaphor bridge.
 # ============================================================
 st.set_page_config(
     page_title="言いカエル おたすけAI",
@@ -763,10 +763,12 @@ def player_topic_instruction(topic):
 def style_logic_mode(style, style_instruction):
     """Choose a generation strategy from the selected style and its private guidance."""
     text = f"{style}\n{style_instruction}"
-    # Sarcasm needs a two-layer meaning. Detect the concept rather than hard-coding
-    # the full private card master in the public app.
+    # Special styles get their own reasoning + review path so surface decoration
+    # cannot overpower the actual meaning of the card.
     if "皮肉" in text or ("ほめ" in text and ("本当の意味" in text or "裏" in text)):
         return "sarcasm"
+    if "詩的" in text or ("情景" in text and "比喩" in text):
+        return "poetic"
     return "general"
 
 
@@ -814,6 +816,177 @@ def sarcasm_generation_rules():
 
 最終条件：answer単体で皮肉が分かり、短く、少し意地があり、でも悪口ではないこと。
 """.strip()
+
+
+def poetic_generation_rules():
+    return """
+【詩的に専用ロジック】
+「きれいな言葉」を足すだけでは詩的とはしません。お題から比喩が飛びすぎないことを最優先にします。
+
+【必ず守る3段階】
+1. お題の一般的なとらえ方から、中心的で具体的な特徴を1つだけ選ぶ。
+2. その特徴と「同じところ」がある身近な物・自然・場面を1つだけ選ぶ。
+3. その共通点を橋にして、短い情景や比喩にする。
+
+【比喩の橋テスト】
+内部で必ず「お題の○○と、たとえた△△は、□□というところが同じ」と1文で説明する。
+この1文が自然に作れない比喩は捨てる。
+共通点は、動き・形・役割・時間・音・温度・重さ・明るさ・集まり方など、子どもにも分かる具体的なものにする。
+
+【ずれを防ぐルール】
+- お題と関係のない「月・星・風・光・夢・空・海・花」などを、きれいだからという理由だけで足さない。
+- たとえを二段三段と連鎖させない。比喩は原則1つ。
+- お題の定番イメージにない出来事を勝手に作らない。
+- 比喩先の物語が主役になり、お題の特徴が見えなくなったら不合格。
+- answerだけでは少し余韻があってよいが、whyを読むと「どこが似ているか」が一発で分かること。
+- 詩的さは、関係の薄い美辞麗句ではなく「ぴったりした一枚の情景」から作る。
+
+【よい詩的表現の条件】
+- お題の特徴が先、比喩は後。
+- 意外だが、共通点を聞くと「なるほど」と戻ってこられる。
+- 5〜6歳が具体的な絵を思い浮かべられる。
+- 短く、比喩が1枚の絵としてまとまっている。
+
+内部では少なくとも10案を作り、「お題との近さ」「共通点の明確さ」「詩的な余韻」「子どもの分かりやすさ」を比べて最も高い案を残す。
+""".strip()
+
+
+def review_poetic_player_answers(topic, topic_instruction, result):
+    """Reject poetic answers whose metaphor has drifted away from the topic anchor."""
+    review_item = {
+        "type": "object",
+        "properties": {
+            "pass": {"type": "boolean"},
+            "anchor_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "bridge_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "poetic_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "child_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "topic_anchor": {"type": "string"},
+            "metaphor_target": {"type": "string"},
+            "shared_feature": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": [
+            "pass", "anchor_score", "bridge_score", "poetic_score", "child_score",
+            "topic_anchor", "metaphor_target", "shared_feature", "reason"
+        ],
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "metaphor": review_item,
+            "nickname": review_item,
+            "twist": review_item,
+        },
+        "required": ["metaphor", "nickname", "twist"],
+        "additionalProperties": False,
+    }
+    compact = {
+        key: {
+            "answer": str((result.get(key, {}) or {}).get("answer", "")),
+            "why": str((result.get(key, {}) or {}).get("why", "")),
+        }
+        for key in ("metaphor", "nickname", "twist")
+    }
+    review = ask_json(
+        f"""
+あなたは子ども向け言葉ゲームの厳しい「詩的な比喩のずれ判定係」です。
+美しさより先に、お題と比喩のつながりを確認してください。
+
+【お題】
+{topic}
+
+【お題の一般的なとらえ方】
+{topic_instruction}
+
+【回答】
+{json.dumps(compact, ensure_ascii=False)}
+
+各回答について、次を0〜3点で判定してください。
+- anchor_score：お題の一般的な特徴を、具体的に1つつかんでいるか。
+- bridge_score：「お題の○○と、たとえた△△は、□□が同じ」と自然な1文で結べるか。
+- poetic_score：関係のない美辞麗句ではなく、ぴったりした一枚の情景になっているか。
+- child_score：5〜6歳が説明を聞けば場面を思い浮かべられるか。
+
+厳しい不合格条件：
+- 月、星、風、光、夢、空、海、花などを、きれいだからというだけで足している。
+- お題の中心的特徴と比喩先の共通点が曖昧。
+- 比喩が二段以上に連鎖し、何をたとえているか分からない。
+- answerやwhyの説明を読んでも、お題へ自然に戻れない。
+- 比喩先の物語が主役になり、お題が置き去りになっている。
+
+比喩が意外でも、shared_featureが具体的で筋が通れば合格してよいです。
+pass=true は4項目すべて2点以上、かつ bridge_score が2点以上の場合だけにしてください。
+reasonは短い日本語1文にしてください。
+""".strip(),
+        "poetic_review",
+        schema,
+        max_output_tokens=700,
+    )
+    problems = []
+    for key in ("metaphor", "nickname", "twist"):
+        item = review.get(key, {}) or {}
+        scores_ok = all(
+            int(item.get(score, 0) or 0) >= 2
+            for score in ("anchor_score", "bridge_score", "poetic_score", "child_score")
+        )
+        if not item.get("pass", False) or not scores_ok:
+            reason = str(item.get("reason", "お題と比喩の橋が弱い")).strip()
+            problems.append(f"{key}:{reason}")
+    return problems
+
+
+def review_poetic_reference(topic, topic_instruction, result):
+    schema = {
+        "type": "object",
+        "properties": {
+            "pass": {"type": "boolean"},
+            "anchor_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "bridge_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "poetic_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "child_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "topic_anchor": {"type": "string"},
+            "metaphor_target": {"type": "string"},
+            "shared_feature": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": [
+            "pass", "anchor_score", "bridge_score", "poetic_score", "child_score",
+            "topic_anchor", "metaphor_target", "shared_feature", "reason"
+        ],
+        "additionalProperties": False,
+    }
+    review = ask_json(
+        f"""
+あなたは「詩的に」の参考回答を判定する係です。
+
+【お題】{topic}
+【一般的なとらえ方】{topic_instruction}
+【参考回答】{result.get('answer', '')}
+【子ども向け説明】{result.get('explanation', '')}
+
+必ず「お題の○○と、たとえた△△は、□□というところが同じ」と1文で結べるか確認してください。
+きれいな単語が入っていても、その共通点が弱ければ不合格です。
+比喩は原則1つ。お題の特徴が主役で、比喩はそれを見せるための道具になっている必要があります。
+
+0〜3点：
+- anchor_score：お題の具体的特徴をつかんでいる。
+- bridge_score：お題と比喩の共通点が具体的で自然。
+- poetic_score：一枚の情景として詩的。
+- child_score：5〜6歳にも説明できる。
+
+pass=true は4項目すべて2点以上の場合だけです。
+""".strip(),
+        "poetic_reference_review",
+        schema,
+        max_output_tokens=330,
+    )
+    scores_ok = all(
+        int(review.get(score, 0) or 0) >= 2
+        for score in ("anchor_score", "bridge_score", "poetic_score", "child_score")
+    )
+    return bool(review.get("pass", False) and scores_ok), str(review.get("reason", "")).strip()
 
 
 def review_sarcasm_player_answers(topic, result):
@@ -1074,7 +1247,7 @@ def player_answers(topic, style):
 【この言い方カードの意味・狙い】
 {style_instruction}
 
-{sarcasm_generation_rules() if logic_mode == "sarcasm" else ""}
+{sarcasm_generation_rules() if logic_mode == "sarcasm" else poetic_generation_rules() if logic_mode == "poetic" else ""}
 
 【お題の扱い方】
 - まず「このお題の一般的な意味・定番イメージ」を土台にする。珍しい例外や、一般的な意味と逆の前提から出発しない。
@@ -1122,6 +1295,7 @@ def player_answers(topic, style):
 - カードが「雰囲気・印象」を求める場合は、擬音や形容詞を足すのではなく、お題の見え方そのものをその印象へ変える。
 - カードが「何かに例える」ことを求める場合は、対象を出すだけではなく、お題との意外で分かりやすい共通点を作る。
 - カードが「前向き・やさしい・鋭い」など評価の方向を求める場合は、評価語を直接足さず、そう感じる理由がフレーズの中に見えるようにする。
+- 「詩的に」の場合は、お題の具体的特徴を1つ先に固定し、その特徴と共通点が1文で説明できる比喩だけを使う。美しい単語から逆算してお題へ近づける作り方は禁止。
 
 【最終チェック】
 3回答それぞれについて、以下を満たさなければ内部で作り直す。
@@ -1170,6 +1344,12 @@ def player_answers(topic, style):
                     " さらに今回は皮肉なので、ただ面白いだけでは不可です。"
                     "表ではほめているように聞こえ、裏では困る点や矛盾を短く刺してください。最後にフォローして丸めず、answer単体で皮肉と分かるキレを残してください。"
                 )
+            elif logic_mode == "poetic":
+                retry_note += (
+                    " 今回は詩的表現なので、きれいな単語を増やすのではなく、"
+                    "お題の具体的特徴を1つ選び、『お題の特徴と比喩先の共通点』を1文で言える比喩へ戻してください。"
+                    "月・星・風・光などを関係なく足さず、比喩は1つの情景に絞ってください。"
+                )
 
         result = ask_json(
             base_prompt + retry_note,
@@ -1211,6 +1391,8 @@ def player_answers(topic, style):
                     last_problems.append(f"{key}:表と裏の意味が不足")
             if not last_problems:
                 last_problems.extend(review_sarcasm_player_answers(topic, result))
+        elif logic_mode == "poetic" and not last_problems:
+            last_problems.extend(review_poetic_player_answers(topic, topic_instruction, result))
 
         if not last_problems:
             return result
@@ -1259,7 +1441,7 @@ def reference_answer(topic, style):
 【この言い方カードの狙い】
 {style_instruction}
 
-{sarcasm_generation_rules() if logic_mode == "sarcasm" else ""}
+{sarcasm_generation_rules() if logic_mode == "sarcasm" else poetic_generation_rules() if logic_mode == "poetic" else ""}
 
 【お題の扱い】
 - 「このお題の一般的な意味・定番イメージ」を必ず発想の出発点にする。
@@ -1284,6 +1466,7 @@ def reference_answer(topic, style):
   ①どの特徴を見たか、②どう見方を変えたか、③言い方カードにどう合わせたか、が分かるようにする。
 - 「なぜ面白いか」も、子どもが分かる言葉で一言入れてよい。
 - 皮肉モードでは「表では何をほめているように聞こえるか」と「ほんとうは何をちょっと困った点として見ているか」の両方を、子ども向けに説明する。
+- 詩的モードでは「お題のどの特徴」と「何にたとえたか」と「どこが同じか」を必ず説明する。「○○と△△は、□□なところが似ているからだよ」と言える具体的な橋を見せる。
 
 【try_it の作り方】
 - 次に子ども自身が別の答えを作るためのコツを1文だけ。
@@ -1316,6 +1499,12 @@ try_it: 自分で考えるためのコツ1つ
                     " 今回は皮肉なので、表ではほめているように聞こえ、"
                     "裏ではやりすぎ・困る点・矛盾を短く刺し、最後にフォローせず、answer単体で皮肉と分かるキレを残してください。"
                 )
+            elif logic_mode == "poetic":
+                retry_note += (
+                    " 今回は詩的表現なので、お題の具体的特徴を1つ固定し、"
+                    "その特徴と比喩先の共通点が子どもにも分かる1文になるように作り直してください。"
+                    "きれいな単語を先に選ぶ作り方や、比喩の連鎖は禁止です。"
+                )
 
         result = ask_json(
             base_prompt + retry_note,
@@ -1346,6 +1535,10 @@ try_it: 自分で考えるためのコツ1つ
                 passed, reason = review_sarcasm_reference(topic, result)
                 if not passed:
                     last_problems.append("皮肉判定:" + (reason or "二重の意味が弱い"))
+        elif logic_mode == "poetic" and not last_problems:
+            passed, reason = review_poetic_reference(topic, topic_instruction, result)
+            if not passed:
+                last_problems.append("詩的比喩判定:" + (reason or "お題と比喩の共通点が弱い"))
         if not last_problems:
             return result
 
