@@ -751,44 +751,62 @@ def style_logic_mode(style, style_instruction):
 
 def sarcasm_generation_rules():
     return """
-【皮肉専用の回答ロジック】
-この言い方では、普通のウィットだけでは不合格です。必ず「表と裏の二重の意味」を作ってください。
+【皮肉たっぷり専用ロジック】
+この言い方では「やさしいウィット」だけでは不合格です。
+聞いた瞬間に「ほめてるようで、ちゃんと刺してる」と分かる、短く切れ味のある皮肉にしてください。
 
-皮肉とは、直接悪く言うことではありません。
-- 表の意味：ほめている、感心している、ありがたがっているように聞こえる。
-- 裏の意味：実は、お題の「やりすぎ」「困るところ」「矛盾」「ずれ」をそっと指している。
-- この2つの間に小さなズレがあるから、聞いた人が「それ、ほめてるようでほめてないね」と気づいて笑える。
+【皮肉の芯】
+- 表：ほめる、感心する、ありがたがる、立派な肩書きを与える、など一見プラスの形を取る。
+- 裏：実際には、お題の「やりすぎ」「困る結果」「矛盾」「空回り」「ズレ」をはっきり指す。
+- オチ：できれば後半の短い言葉で意味をひっくり返す。説明しすぎず、最後に小さく刺す。
+- 皮肉の対象は、人そのものではなく、その人の行動・状況・出来事を優先する。
 
-作る順番：
-1. お題の特徴を1つ選ぶ。
-2. その特徴が行きすぎたときに、何が少し困る・おかしい・矛盾するかを決める。
-3. その困る点を、わざと「ほめ言葉・感謝・感心」の形で包む。
-4. 説明を消し、短い一言にする。
+【切れ味を出す4つの型】
+1. ほめ殺し型：普通なら困る点を、わざと大げさな長所としてほめる。
+2. 結果ツッコミ型：立派そうに言ったあと、その結果起きる困りごとを一言で置く。
+3. 逆肩書き型：行動のズレが一瞬で見える、少し意地のある肩書きにする。
+4. 無表情型：感情的に悪く言わず、事実を淡々と並べることで可笑しさを出す。
 
-絶対に避けるもの：
-- ただの悪口、否定、きつい言葉。
-- ただ面白いだけ、変なだけ、大げさなだけの言い換え。
-- 「すごい」「さすが」「最高」を付けただけで、裏の意味がないもの。
-- why を読まないと皮肉だと分からない回答。answer 単体にも表と裏のズレが必要。
+【作る順番】
+1. お題の特徴を1つだけ選ぶ。
+2. その特徴が行きすぎると何が困るのか、具体的な結果を1つ決める。
+3. その困る結果を、わざと「ほめ言葉・感心・肩書き」の形で包む。
+4. 前半より後半を強くし、最後の数語にオチを置く。
+5. 内部では少なくとも12案を比較し、「皮肉の明確さ」「ウィット」「切れ味」が最も高い案を残す。
 
-各候補について、内部確認用に次も作ること：
+【優しすぎ判定】
+次のどれかに当てはまる案は捨てる。
+- そのまま本気のほめ言葉として受け取れてしまう。
+- 「ちょっと面白い」だけで、困る点や矛盾が見えない。
+- 最後にフォローして丸く収めてしまう。
+- 「すごい」「さすが」「最高」を付けただけ。
+- whyを読まないと皮肉だと分からない。
+
+【禁止】
+- 人格否定、容姿いじり、差別、侮辱、残酷な表現。
+- 子どもがまねして相手を傷つけるような直接的な悪口。
+- 長い説明文。
+
+各候補について内部確認用に次も作ること：
 - surface_meaning：表向きには何をほめているように聞こえるか。
 - hidden_meaning：本当はどんな困りごと・矛盾・やりすぎを指しているか。
-この2つが同じ方向の意味なら、その候補は皮肉ではないので捨てる。
 
-5〜6歳向けなので、人そのものを傷つけず、生活の中で想像できる小さなズレを使ってください。
+最終条件：answer単体で皮肉が分かり、短く、少し意地があり、でも悪口ではないこと。
 """.strip()
 
 
 def review_sarcasm_player_answers(topic, result):
-    """Use a strict second pass so witty-but-not-sarcastic answers are rejected."""
+    """Reject soft, merely funny, or non-ironic answers in a strict second pass."""
     review_item = {
         "type": "object",
         "properties": {
             "pass": {"type": "boolean"},
+            "irony_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "wit_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "cut_score": {"type": "integer", "minimum": 0, "maximum": 3},
             "reason": {"type": "string"},
         },
-        "required": ["pass", "reason"],
+        "required": ["pass", "irony_score", "wit_score", "cut_score", "reason"],
         "additionalProperties": False,
     }
     schema = {
@@ -811,32 +829,40 @@ def review_sarcasm_player_answers(topic, result):
     }
     review = ask_json(
         f"""
-あなたは子ども向け言葉ゲームの厳しい「皮肉判定係」です。
-お題は「{topic}」です。次の3回答が、本当に皮肉になっているかだけを判定してください。
+あなたは子ども向け言葉ゲームの厳しい「皮肉たっぷり判定係」です。
+お題は「{topic}」です。次の3回答を判定してください。
 
 {json.dumps(compact, ensure_ascii=False)}
 
-合格条件：
-- answerそのものが、表向きはほめる・感心する・ありがたがる方向に聞こえる。
-- 同時に、裏ではお題のやりすぎ・困る点・矛盾・ずれを指している。
-- 表と裏に明確なズレがある。
-- 直接の悪口や単なる否定ではない。
-- 単なるジョーク、比喩、あだ名、大げさ表現だけではない。
-- 5〜6歳でも、説明を聞けば「ほめているみたいだけど、ほんとうはちょっと逆なんだ」と理解できる。
-- whyや説明に皮肉があるだけでは不可。answer単体に二重の意味が必要。
+0〜3点で採点：
+- irony_score：ほめる形と本当の意味が明確に逆向きか。
+- wit_score：ただの悪口ではなく、「そう来たか」と思える知的なひねりがあるか。
+- cut_score：優しすぎず、短い言葉の中にキレや小さな毒があるか。
 
-少しでも「ただの面白い言い換え」に見える場合は pass=false にしてください。
+合格条件：
+- answer単体で皮肉が分かる。
+- 表向きはプラスに見えるのに、裏では困る結果・矛盾・やりすぎを具体的に刺している。
+- できれば後半にオチがあり、最後の数語で意味がひっくり返る。
+- 本気のほめ言葉としてそのまま成立するなら不合格。
+- 単なるジョーク、かわいい言い換え、比喩、大げさ表現だけなら不合格。
+- 「やさしくまとめた」「最後にフォローした」ために毒が消えている場合は不合格。
+- 人格・容姿・属性を攻撃する悪口は不合格。
+- 行動や状況を切る皮肉は可。
+- 5〜6歳でも説明を聞けば意味が分かる。
+
+pass=true は irony_score、wit_score、cut_score がすべて2以上の場合だけにしてください。
 reasonは短い日本語1文にしてください。
 """.strip(),
         "sarcasm_review",
         schema,
-        max_output_tokens=360,
+        max_output_tokens=500,
     )
     problems = []
     for key in ("metaphor", "nickname", "twist"):
         item = review.get(key, {}) or {}
-        if not item.get("pass", False):
-            reason = str(item.get("reason", "皮肉の二重構造が弱い")).strip()
+        scores_ok = all(int(item.get(score, 0) or 0) >= 2 for score in ("irony_score", "wit_score", "cut_score"))
+        if not item.get("pass", False) or not scores_ok:
+            reason = str(item.get("reason", "皮肉のキレが弱い")).strip()
             problems.append(f"{key}:{reason}")
     return problems
 
@@ -846,28 +872,37 @@ def review_sarcasm_reference(topic, result):
         "type": "object",
         "properties": {
             "pass": {"type": "boolean"},
+            "irony_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "wit_score": {"type": "integer", "minimum": 0, "maximum": 3},
+            "cut_score": {"type": "integer", "minimum": 0, "maximum": 3},
             "reason": {"type": "string"},
         },
-        "required": ["pass", "reason"],
+        "required": ["pass", "irony_score", "wit_score", "cut_score", "reason"],
         "additionalProperties": False,
     }
     review = ask_json(
         f"""
-あなたは子ども向け言葉ゲームの厳しい「皮肉判定係」です。
+あなたは子ども向け言葉ゲームの厳しい「皮肉たっぷり判定係」です。
 お題は「{topic}」です。
 参考回答は「{result.get('answer', '')}」です。
 表向きの意味は「{result.get('surface_meaning', '')}」。
 裏の意味は「{result.get('hidden_meaning', '')}」。
 
-この回答が、表ではほめる・感心するように聞こえながら、裏ではお題の困る点・矛盾・やりすぎを指す「二重の意味」になっているか判定してください。
-ただの面白い言い換え、直接の悪口、単なる大げさ表現なら不合格です。
-answer単体に皮肉が感じられない場合も不合格です。
+次を0〜3点で判定してください。
+- irony_score：表と裏がちゃんと逆向きか。
+- wit_score：「そう来たか」と思えるひねりがあるか。
+- cut_score：優しすぎず、短いキレや小さな毒があるか。
+
+本気のほめ言葉として成立してしまう、ただ面白いだけ、最後にフォローして丸くなっている、answer単体では皮肉が分からない場合は不合格です。
+一方で、人格・容姿・属性への悪口も不合格です。行動や状況の矛盾を短く切るものを評価してください。
+pass=true は3項目すべて2点以上の場合だけです。
 """.strip(),
         "sarcasm_reference_review",
         schema,
-        max_output_tokens=180,
+        max_output_tokens=260,
     )
-    return bool(review.get("pass", False)), str(review.get("reason", "")).strip()
+    scores_ok = all(int(review.get(score, 0) or 0) >= 2 for score in ("irony_score", "wit_score", "cut_score"))
+    return bool(review.get("pass", False) and scores_ok), str(review.get("reason", "")).strip()
 
 
 def non_japanese_letters(text):
@@ -1054,7 +1089,7 @@ def player_answers(topic, style):
             if logic_mode == "sarcasm":
                 retry_note += (
                     " さらに今回は皮肉なので、ただ面白いだけでは不可です。"
-                    "表ではほめているように聞こえ、裏では困る点や矛盾を指す二重の意味をanswer自体に入れてください。"
+                    "表ではほめているように聞こえ、裏では困る点や矛盾を短く刺してください。最後にフォローして丸めず、answer単体で皮肉と分かるキレを残してください。"
                 )
 
         result = ask_json(
@@ -1177,7 +1212,7 @@ try_it: 自分で考えるためのコツ1つ
             if logic_mode == "sarcasm":
                 retry_note += (
                     " 今回は皮肉なので、表ではほめているように聞こえ、"
-                    "裏ではやりすぎ・困る点・矛盾を指す二重の意味がanswer単体で分かるようにしてください。"
+                    "裏ではやりすぎ・困る点・矛盾を短く刺し、最後にフォローせず、answer単体で皮肉と分かるキレを残してください。"
                 )
 
         result = ask_json(
