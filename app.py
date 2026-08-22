@@ -23,6 +23,7 @@ except Exception:
 
 # ============================================================
 # Basic settings
+# v17: player answers are validated to use Japanese writing only.
 # ============================================================
 st.set_page_config(
     page_title="言いカエル おたすけAI",
@@ -643,6 +644,54 @@ def player_style_instruction(style):
     return "言い方カードの語感・形式・雰囲気が、回答だけを聞いても明確に伝わるようにする。"
 
 
+def non_japanese_letters(text):
+    """Return letter characters that are not Japanese kana/kanji.
+
+    Punctuation, digits, spaces, and symbols are allowed. Alphabetic characters
+    from Latin, Devanagari, Cyrillic, Hangul, Arabic, etc. are rejected so that
+    player-facing AI text stays in Japanese notation.
+    """
+    bad = []
+    for ch in str(text or ""):
+        code = ord(ch)
+        is_hiragana = 0x3040 <= code <= 0x309F
+        is_katakana = 0x30A0 <= code <= 0x30FF
+        is_halfwidth_katakana = 0xFF65 <= code <= 0xFF9F
+        is_cjk = (
+            0x3400 <= code <= 0x4DBF
+            or 0x4E00 <= code <= 0x9FFF
+            or 0xF900 <= code <= 0xFAFF
+        )
+        is_japanese_mark = 0x3000 <= code <= 0x303F
+
+        if is_hiragana or is_katakana or is_halfwidth_katakana or is_cjk or is_japanese_mark:
+            continue
+        if ch.isspace() or ch.isdigit():
+            continue
+        # Punctuation / symbols (。！？「」・〜、 etc.) are fine.
+        import unicodedata
+        category = unicodedata.category(ch)
+        if category.startswith("P") or category.startswith("S"):
+            continue
+        # Any remaining Unicode letter is a non-Japanese writing system.
+        if category.startswith("L") or category.startswith("M"):
+            bad.append(ch)
+    return bad
+
+
+def player_text_has_foreign_script(result):
+    fields = []
+    for key in ("metaphor", "nickname", "twist"):
+        item = result.get(key, {}) or {}
+        fields.extend([
+            item.get("answer", ""),
+            item.get("why", ""),
+            item.get("new_word", ""),
+            item.get("new_word_meaning", ""),
+        ])
+    return any(non_japanese_letters(value) for value in fields)
+
+
 def player_answers(topic, style):
     style_instruction = player_style_instruction(style)
     answer_schema = {
@@ -690,6 +739,10 @@ def player_answers(topic, style):
 - 「最強」「伝説」「ヒーロー」「王様」「達人」「マスター」などの便利な称号を足すだけの回答は禁止。使う場合も、その称号自体にお題との意外で筋の通った関係が必要。
 - answer は原則ワンフレーズ、最大でも短いツーフレーズ。一息〜二息、合計30文字以内を目安にする。
 - お題カードの文言「{topic}」を answer にそのまま使わない。別の言葉・比喩・役割・情景に変換する。
+- 出力する answer・why・new_word・new_word_meaning は、すべて日本語表記だけにする。
+- 英語・ヒンディー語・中国語の簡体字表現・韓国語など、外国語や日本語以外の文字体系を混ぜない。
+- アルファベットも原則使わない。外来語は日本で一般的なカタカナ表記に直す。
+- 日本語の漢字・ひらがな・カタカナ・数字・一般的な句読点だけで、5〜6歳が読んだり聞いたりできる形にする。
 
 【内部での作り方】
 最終回答を出す前に、内部では次の順で考える。途中案は出力しない。
@@ -726,6 +779,7 @@ def player_answers(topic, style):
 - 大人が聞いても「少しうまい」と感じるひねりがあるか。
 - 子どもが笑える余地があるか。
 - お題カードの文言「{topic}」をそのまま使っていないか。
+- 日本語以外の文字体系や外国語表記が1文字でも混ざっていないか。混ざっていたら日本語に直してから出力する。
 - 3つの発想が重複していないか。
 
 【出力ルール】
@@ -745,13 +799,18 @@ def player_answers(topic, style):
         return bool(topic_text and topic_text in answer_text)
 
     last_result = None
-    for attempt in range(3):
+    last_problems = []
+    for attempt in range(4):
         retry_note = ""
         if attempt > 0:
+            problems = "、".join(last_problems) if last_problems else "出力条件"
             retry_note = (
                 "\n\n【作り直し指示】\n"
-                f"前の回答には、お題カードの文言『{topic}』がそのまま含まれていました。"
-                "その文言を一切使わず、表面的な擬音・派手語・語尾変更にも逃げず、"
+                f"前の回答は『{problems}』の条件に違反していました。"
+                f"お題カードの文言『{topic}』をそのまま使わず、"
+                "日本語以外の文字・外国語・アルファベットを一切混ぜず、"
+                "外来語が必要ならカタカナ表記にし、"
+                "表面的な擬音・派手語・語尾変更にも逃げず、"
                 "見方を1回ずらした、短く筋の通るウィットへ作り直してください。"
             )
 
@@ -768,10 +827,16 @@ def player_answers(topic, style):
             result.get("nickname", {}).get("answer", ""),
             result.get("twist", {}).get("answer", ""),
         ]
-        if not any(topic_is_reused(answer) for answer in answers):
+        last_problems = []
+        if any(topic_is_reused(answer) for answer in answers):
+            last_problems.append("お題の文言をそのまま使用")
+        if player_text_has_foreign_script(result):
+            last_problems.append("日本語以外の文字を使用")
+
+        if not last_problems:
             return result
 
-    raise ValueError("お題カードの文言を使わない回答を作れませんでした。もう一度AIの回答を生成してください。")
+    raise ValueError("日本語だけで、お題の文言をそのまま使わない回答を作れませんでした。もう一度AIの回答を生成してください。")
 
 
 def player_speech_text(answers):
