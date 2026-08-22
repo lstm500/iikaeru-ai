@@ -639,10 +639,9 @@ def explain_topic_and_style_for_child(topic, style):
         "type": "object",
         "properties": {
             "topic_meaning": {"type": "string"},
-            "topic_example": {"type": "string"},
             "style_meaning": {"type": "string"},
         },
-        "required": ["topic_meaning", "topic_example", "style_meaning"],
+        "required": ["topic_meaning", "style_meaning"],
         "additionalProperties": False,
     }
 
@@ -666,7 +665,6 @@ def explain_topic_and_style_for_child(topic, style):
 【ルール】
 - 5〜6歳に話しかける自然な日本語にする。
 - topic_meaning は1〜2文。難しい言葉を使わず、お題がどんなもの・人・場面かを説明する。
-- topic_example は1文。日常で想像しやすい具体的な場面を1つだけ出す。
 - style_meaning は1〜2文。言い方カードが「どんな見方・雰囲気・表し方を求めているか」を子ども向けに説明する。
 - style_meaning では、今回のお題に対する完成回答や、そのまま使える言い換え例は絶対に出さない。
 - 言い方カードの表面的な語尾・擬音だけを説明するのではなく、内部方針を踏まえて「どういう見方をする言い方なのか」をやさしく説明する。
@@ -693,23 +691,20 @@ def explain_topic_and_style_for_child(topic, style):
         last_result = result
         joined = " ".join(
             str(result.get(key, ""))
-            for key in ("topic_meaning", "topic_example", "style_meaning")
+            for key in ("topic_meaning", "style_meaning")
         )
         if not non_japanese_letters(joined):
             return result
 
-    return last_result or {"topic_meaning": "", "topic_example": "", "style_meaning": ""}
+    return last_result or {"topic_meaning": "", "style_meaning": ""}
 
 
 def topic_explanation_speech_text(item):
     topic_meaning = str((item or {}).get("topic_meaning", "")).strip()
-    topic_example = str((item or {}).get("topic_example", "")).strip()
     style_meaning = str((item or {}).get("style_meaning", "")).strip()
     parts = []
     if topic_meaning:
         parts.append(f"まず、お題のせつめい。{topic_meaning}")
-    if topic_example:
-        parts.append(f"たとえば、{topic_example}")
     if style_meaning:
         parts.append(f"つぎに、言い方のせつめい。{style_meaning}")
     return " ".join(parts)
@@ -742,6 +737,137 @@ def player_style_instruction(style):
             if instruction:
                 return instruction
     return "言い方カードの語感・形式・雰囲気が、回答だけを聞いても明確に伝わるようにする。"
+
+
+def style_logic_mode(style, style_instruction):
+    """Choose a generation strategy from the selected style and its private guidance."""
+    text = f"{style}\n{style_instruction}"
+    # Sarcasm needs a two-layer meaning. Detect the concept rather than hard-coding
+    # the full private card master in the public app.
+    if "皮肉" in text or ("ほめ" in text and ("本当の意味" in text or "裏" in text)):
+        return "sarcasm"
+    return "general"
+
+
+def sarcasm_generation_rules():
+    return """
+【皮肉専用の回答ロジック】
+この言い方では、普通のウィットだけでは不合格です。必ず「表と裏の二重の意味」を作ってください。
+
+皮肉とは、直接悪く言うことではありません。
+- 表の意味：ほめている、感心している、ありがたがっているように聞こえる。
+- 裏の意味：実は、お題の「やりすぎ」「困るところ」「矛盾」「ずれ」をそっと指している。
+- この2つの間に小さなズレがあるから、聞いた人が「それ、ほめてるようでほめてないね」と気づいて笑える。
+
+作る順番：
+1. お題の特徴を1つ選ぶ。
+2. その特徴が行きすぎたときに、何が少し困る・おかしい・矛盾するかを決める。
+3. その困る点を、わざと「ほめ言葉・感謝・感心」の形で包む。
+4. 説明を消し、短い一言にする。
+
+絶対に避けるもの：
+- ただの悪口、否定、きつい言葉。
+- ただ面白いだけ、変なだけ、大げさなだけの言い換え。
+- 「すごい」「さすが」「最高」を付けただけで、裏の意味がないもの。
+- why を読まないと皮肉だと分からない回答。answer 単体にも表と裏のズレが必要。
+
+各候補について、内部確認用に次も作ること：
+- surface_meaning：表向きには何をほめているように聞こえるか。
+- hidden_meaning：本当はどんな困りごと・矛盾・やりすぎを指しているか。
+この2つが同じ方向の意味なら、その候補は皮肉ではないので捨てる。
+
+5〜6歳向けなので、人そのものを傷つけず、生活の中で想像できる小さなズレを使ってください。
+""".strip()
+
+
+def review_sarcasm_player_answers(topic, result):
+    """Use a strict second pass so witty-but-not-sarcastic answers are rejected."""
+    review_item = {
+        "type": "object",
+        "properties": {
+            "pass": {"type": "boolean"},
+            "reason": {"type": "string"},
+        },
+        "required": ["pass", "reason"],
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "metaphor": review_item,
+            "nickname": review_item,
+            "twist": review_item,
+        },
+        "required": ["metaphor", "nickname", "twist"],
+        "additionalProperties": False,
+    }
+    compact = {
+        key: {
+            "answer": str((result.get(key, {}) or {}).get("answer", "")),
+            "surface_meaning": str((result.get(key, {}) or {}).get("surface_meaning", "")),
+            "hidden_meaning": str((result.get(key, {}) or {}).get("hidden_meaning", "")),
+        }
+        for key in ("metaphor", "nickname", "twist")
+    }
+    review = ask_json(
+        f"""
+あなたは子ども向け言葉ゲームの厳しい「皮肉判定係」です。
+お題は「{topic}」です。次の3回答が、本当に皮肉になっているかだけを判定してください。
+
+{json.dumps(compact, ensure_ascii=False)}
+
+合格条件：
+- answerそのものが、表向きはほめる・感心する・ありがたがる方向に聞こえる。
+- 同時に、裏ではお題のやりすぎ・困る点・矛盾・ずれを指している。
+- 表と裏に明確なズレがある。
+- 直接の悪口や単なる否定ではない。
+- 単なるジョーク、比喩、あだ名、大げさ表現だけではない。
+- 5〜6歳でも、説明を聞けば「ほめているみたいだけど、ほんとうはちょっと逆なんだ」と理解できる。
+- whyや説明に皮肉があるだけでは不可。answer単体に二重の意味が必要。
+
+少しでも「ただの面白い言い換え」に見える場合は pass=false にしてください。
+reasonは短い日本語1文にしてください。
+""".strip(),
+        "sarcasm_review",
+        schema,
+        max_output_tokens=360,
+    )
+    problems = []
+    for key in ("metaphor", "nickname", "twist"):
+        item = review.get(key, {}) or {}
+        if not item.get("pass", False):
+            reason = str(item.get("reason", "皮肉の二重構造が弱い")).strip()
+            problems.append(f"{key}:{reason}")
+    return problems
+
+
+def review_sarcasm_reference(topic, result):
+    schema = {
+        "type": "object",
+        "properties": {
+            "pass": {"type": "boolean"},
+            "reason": {"type": "string"},
+        },
+        "required": ["pass", "reason"],
+        "additionalProperties": False,
+    }
+    review = ask_json(
+        f"""
+あなたは子ども向け言葉ゲームの厳しい「皮肉判定係」です。
+お題は「{topic}」です。
+参考回答は「{result.get('answer', '')}」です。
+表向きの意味は「{result.get('surface_meaning', '')}」。
+裏の意味は「{result.get('hidden_meaning', '')}」。
+
+この回答が、表ではほめる・感心するように聞こえながら、裏ではお題の困る点・矛盾・やりすぎを指す「二重の意味」になっているか判定してください。
+ただの面白い言い換え、直接の悪口、単なる大げさ表現なら不合格です。
+answer単体に皮肉が感じられない場合も不合格です。
+""".strip(),
+        "sarcasm_reference_review",
+        schema,
+        max_output_tokens=180,
+    )
+    return bool(review.get("pass", False)), str(review.get("reason", "")).strip()
 
 
 def non_japanese_letters(text):
@@ -794,15 +920,25 @@ def player_text_has_foreign_script(result):
 
 def player_answers(topic, style):
     style_instruction = player_style_instruction(style)
+    logic_mode = style_logic_mode(style, style_instruction)
+    answer_properties = {
+        "answer": {"type": "string"},
+        "why": {"type": "string"},
+        "new_word": {"type": "string"},
+        "new_word_meaning": {"type": "string"},
+    }
+    answer_required = ["answer", "why", "new_word", "new_word_meaning"]
+    if logic_mode == "sarcasm":
+        answer_properties.update({
+            "surface_meaning": {"type": "string"},
+            "hidden_meaning": {"type": "string"},
+        })
+        answer_required.extend(["surface_meaning", "hidden_meaning"])
+
     answer_schema = {
         "type": "object",
-        "properties": {
-            "answer": {"type": "string"},
-            "why": {"type": "string"},
-            "new_word": {"type": "string"},
-            "new_word_meaning": {"type": "string"},
-        },
-        "required": ["answer", "why", "new_word", "new_word_meaning"],
+        "properties": answer_properties,
+        "required": answer_required,
         "additionalProperties": False,
     }
     schema = {
@@ -829,6 +965,8 @@ def player_answers(topic, style):
 
 【この言い方カードの意味・狙い】
 {style_instruction}
+
+{sarcasm_generation_rules() if logic_mode == "sarcasm" else ""}
 
 【回答を作る基本思想】
 - 最優先は「一休さん的なウィット」。普通の見方をそのまま言わず、前提・役割・長所短所・場面・たとえのどれかを1回ひっくり返す。
@@ -885,7 +1023,7 @@ def player_answers(topic, style):
 【出力ルール】
 - answer は説明文にしない。説明は why に分ける。
 - why は子ども向けに1文で、「どこをどう見方を変えたから面白いか」が分かるようにする。
-- 難解な熟語、抽象語、大人しか分からない皮肉、ネットスラングは避ける。
+- 難解な熟語、抽象語、ネットスラングは避ける。皮肉モードでは、5〜6歳にも説明できる二重の意味を使う。
 - ダジャレは、意味も通る場合だけ使う。音が似ているだけのダジャレは避ける。
 - 人を傷つける、容姿をばかにする、差別的な表現は避ける。
 - お題に人の弱点が含まれていても、その人を笑うのではなく「見方のずらし」で笑いを作る。
@@ -913,6 +1051,11 @@ def player_answers(topic, style):
                 "表面的な擬音・派手語・語尾変更にも逃げず、"
                 "見方を1回ずらした、短く筋の通るウィットへ作り直してください。"
             )
+            if logic_mode == "sarcasm":
+                retry_note += (
+                    " さらに今回は皮肉なので、ただ面白いだけでは不可です。"
+                    "表ではほめているように聞こえ、裏では困る点や矛盾を指す二重の意味をanswer自体に入れてください。"
+                )
 
         result = ask_json(
             base_prompt + retry_note,
@@ -933,6 +1076,14 @@ def player_answers(topic, style):
         if player_text_has_foreign_script(result):
             last_problems.append("日本語以外の文字を使用")
 
+        if logic_mode == "sarcasm":
+            for key in ("metaphor", "nickname", "twist"):
+                item = result.get(key, {}) or {}
+                if not str(item.get("surface_meaning", "")).strip() or not str(item.get("hidden_meaning", "")).strip():
+                    last_problems.append(f"{key}:表と裏の意味が不足")
+            if not last_problems:
+                last_problems.extend(review_sarcasm_player_answers(topic, result))
+
         if not last_problems:
             return result
 
@@ -942,14 +1093,23 @@ def player_answers(topic, style):
 def reference_answer(topic, style):
     """Create one pedagogical reference answer with a child-friendly explanation."""
     style_instruction = player_style_instruction(style)
+    logic_mode = style_logic_mode(style, style_instruction)
+    properties = {
+        "answer": {"type": "string"},
+        "explanation": {"type": "string"},
+        "try_it": {"type": "string"},
+    }
+    required = ["answer", "explanation", "try_it"]
+    if logic_mode == "sarcasm":
+        properties.update({
+            "surface_meaning": {"type": "string"},
+            "hidden_meaning": {"type": "string"},
+        })
+        required.extend(["surface_meaning", "hidden_meaning"])
     schema = {
         "type": "object",
-        "properties": {
-            "answer": {"type": "string"},
-            "explanation": {"type": "string"},
-            "try_it": {"type": "string"},
-        },
-        "required": ["answer", "explanation", "try_it"],
+        "properties": properties,
+        "required": required,
         "additionalProperties": False,
     }
 
@@ -967,6 +1127,8 @@ def reference_answer(topic, style):
 【この言い方カードの狙い】
 {style_instruction}
 
+{sarcasm_generation_rules() if logic_mode == "sarcasm" else ""}
+
 【最重要】
 - 参考回答は1つだけ。
 - 答えの巧さよりも、発想のしかたを教えることを重視する。
@@ -975,7 +1137,7 @@ def reference_answer(topic, style):
 - お題カードの文言「{topic}」を answer にそのまま使わない。
 - answer は原則ワンフレーズ、最大でも短いツーフレーズ。30文字以内を目安にする。
 - 5〜6歳が頭に絵を浮かべられ、少し笑える内容にする。
-- 難しい熟語や大人だけに分かる皮肉は避ける。
+- 難しい熟語は避ける。皮肉モードでは、5〜6歳にも説明できる「ほめているようで、ほんとうは少し逆」の二重の意味にする。
 - 日本語の漢字・ひらがな・カタカナ・数字・一般的な句読点だけを使う。外国語文字やアルファベットは使わない。
 
 【explanation の作り方】
@@ -984,6 +1146,7 @@ def reference_answer(topic, style):
 - 「お題の○○というところを見たよ。そこを△△みたいに見方を変えたよ。だから□□という言葉にしたよ。」のように、
   ①どの特徴を見たか、②どう見方を変えたか、③言い方カードにどう合わせたか、が分かるようにする。
 - 「なぜ面白いか」も、子どもが分かる言葉で一言入れてよい。
+- 皮肉モードでは「表では何をほめているように聞こえるか」と「ほんとうは何をちょっと困った点として見ているか」の両方を、子ども向けに説明する。
 
 【try_it の作り方】
 - 次に子ども自身が別の答えを作るためのコツを1文だけ。
@@ -1011,6 +1174,11 @@ try_it: 自分で考えるためのコツ1つ
                 + "の条件に違反しました。答えは1つだけにし、日本語だけで、"
                 "お題の言葉をそのまま使わず、子どもに発想のしかたが伝わる形へ作り直してください。"
             )
+            if logic_mode == "sarcasm":
+                retry_note += (
+                    " 今回は皮肉なので、表ではほめているように聞こえ、"
+                    "裏ではやりすぎ・困る点・矛盾を指す二重の意味がanswer単体で分かるようにしてください。"
+                )
 
         result = ask_json(
             base_prompt + retry_note,
@@ -1025,6 +1193,13 @@ try_it: 自分で考えるためのコツ1つ
             last_problems.append("日本語以外の文字を使用")
         if not str(result.get("answer", "")).strip():
             last_problems.append("参考回答が空")
+        if logic_mode == "sarcasm":
+            if not str(result.get("surface_meaning", "")).strip() or not str(result.get("hidden_meaning", "")).strip():
+                last_problems.append("皮肉の表と裏の意味が不足")
+            if not last_problems:
+                passed, reason = review_sarcasm_reference(topic, result)
+                if not passed:
+                    last_problems.append("皮肉判定:" + (reason or "二重の意味が弱い"))
         if not last_problems:
             return result
 
@@ -1811,8 +1986,6 @@ if st.session_state.topic_explanation:
         <div class="support-card">
           <b>お題のせつめい</b><br><br>
           {item.get('topic_meaning', '')}<br><br>
-          <b>たとえば</b><br>
-          {item.get('topic_example', '')}<br><br>
           <b>言い方のせつめい</b><br><br>
           {item.get('style_meaning', '')}
         </div>
