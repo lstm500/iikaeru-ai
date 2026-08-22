@@ -646,11 +646,15 @@ def explain_topic_and_style_for_child(topic, style):
     }
 
     style_instruction = player_style_instruction(style)
+    topic_instruction = player_topic_instruction(topic)
     base_prompt = f"""
 あなたは、5〜6歳の子どもにカードゲーム「言いカエル」のカードの意味をやさしく説明する先生役です。
 
 【今回のお題カード】
 {topic}
+
+【お題カードの一般的なとらえ方】
+{topic_instruction}
 
 【今回の言い方カード】
 {style}
@@ -665,6 +669,8 @@ def explain_topic_and_style_for_child(topic, style):
 【ルール】
 - 5〜6歳に話しかける自然な日本語にする。
 - topic_meaning は1〜2文。難しい言葉を使わず、お題がどんなもの・人・場面かを説明する。
+- topic_meaning は「お題カードの一般的なとらえ方」を優先する。珍しい例外や、一般的な意味と逆の説明を標準として扱わない。
+- 「一般的なとらえ方」は絶対の決めつけではなく、ゲームで共有しやすい定番イメージとして使う。
 - style_meaning は1〜2文。言い方カードが「どんな見方・雰囲気・表し方を求めているか」を子ども向けに説明する。
 - style_meaning では、今回のお題に対する完成回答や、そのまま使える言い換え例は絶対に出さない。
 - 言い方カードの表面的な語尾・擬音だけを説明するのではなく、内部方針を踏まえて「どういう見方をする言い方なのか」をやさしく説明する。
@@ -737,6 +743,21 @@ def player_style_instruction(style):
             if instruction:
                 return instruction
     return "言い方カードの語感・形式・雰囲気が、回答だけを聞いても明確に伝わるようにする。"
+
+
+def player_topic_instruction(topic):
+    """Load the conventional/common interpretation of a topic from the private card master."""
+    target = str(topic or "").strip()
+    for row in load_card_rows():
+        if row["card_type"] == "topic" and row["card_text"] == target:
+            instruction = str(row.get("ai_instruction") or "").strip()
+            if instruction:
+                return instruction
+    return (
+        "このお題について、日本で一般的に共有される意味・典型的な場面・定番のイメージを基準にする。"
+        "珍しい例外や言葉遊びだけを標準的な意味として扱わない。"
+        "逆転や皮肉を作る場合も、事実関係を逆にせず、評価や見方だけをひねる。"
+    )
 
 
 def style_logic_mode(style, style_instruction):
@@ -953,8 +974,57 @@ def player_text_has_foreign_script(result):
     return any(non_japanese_letters(value) for value in fields)
 
 
+def review_topic_alignment(topic, topic_instruction, style, answer_items):
+    """Check that creative answers stay anchored to the conventional meaning of the topic."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "passed": {"type": "boolean"},
+            "reason": {"type": "string"},
+        },
+        "required": ["passed", "reason"],
+        "additionalProperties": False,
+    }
+    joined = "\n".join(
+        f"{label}: {item.get('answer', '')} / 理由: {item.get('why', item.get('explanation', ''))}"
+        for label, item in answer_items
+    )
+    return ask_json(
+        f"""
+あなたはカードゲーム『言いカエル』の意味確認係です。
+創作の面白さではなく、お題について一般に共有される意味・定番イメージから不自然に外れていないかだけを確認してください。
+
+【お題】
+{topic}
+
+【一般的なとらえ方】
+{topic_instruction}
+
+【言い方カード】
+{style}
+
+【確認する回答】
+{joined}
+
+【判定基準】
+- 一般的なとらえ方にある中心的な事実・役割・状況を土台にしていれば合格。
+- 比喩、誇張、皮肉、逆転、あだ名は自由。ただし「事実そのもの」を逆にしてはいけない。
+- 逆転は「困る→役立つ」「弱点→長所」など評価や見方を反転するのはよいが、「本来あるものを無いことにする」「普通は起きることを起きないことにする」など、定番の前提を打ち消すだけの回答は不合格。
+- 珍しい例外を、あたかもそのお題の普通の姿のように扱う回答は不合格。
+- 一般的なとらえ方に複数の側面がある場合は、そのどれか1つに正しく乗っていればよい。
+- 人については、性格・能力・健康状態を見た目や属性だけから決めつけない。
+
+問題なければ passed=true。ずれていれば passed=false にして、reason に何が一般認識と食い違うかを短く書いてください。
+""".strip(),
+        "topic_alignment_review",
+        schema,
+        max_output_tokens=220,
+    )
+
+
 def player_answers(topic, style):
     style_instruction = player_style_instruction(style)
+    topic_instruction = player_topic_instruction(topic)
     logic_mode = style_logic_mode(style, style_instruction)
     answer_properties = {
         "answer": {"type": "string"},
@@ -995,6 +1065,9 @@ def player_answers(topic, style):
 【お題】
 {topic}
 
+【このお題の一般的な意味・定番イメージ】
+{topic_instruction}
+
 【言い方カード】
 {style}
 
@@ -1002,6 +1075,12 @@ def player_answers(topic, style):
 {style_instruction}
 
 {sarcasm_generation_rules() if logic_mode == "sarcasm" else ""}
+
+【お題の扱い方】
+- まず「このお題の一般的な意味・定番イメージ」を土台にする。珍しい例外や、一般的な意味と逆の前提から出発しない。
+- ひねるのは「評価・見方・役割・たとえ」であって、中心的な事実関係そのものではない。
+- ぎゃくてんカエルでも、事実を反対にするのではなく、「大変→役に立つ」「困る→面白い」のように価値づけを反転する。
+- お題に複数の定番イメージがあるときは、そのうち1つを明確に選んで発想の土台にする。
 
 【回答を作る基本思想】
 - 最優先は「一休さん的なウィット」。普通の見方をそのまま言わず、前提・役割・長所短所・場面・たとえのどれかを1回ひっくり返す。
@@ -1111,6 +1190,20 @@ def player_answers(topic, style):
         if player_text_has_foreign_script(result):
             last_problems.append("日本語以外の文字を使用")
 
+        if not last_problems:
+            alignment = review_topic_alignment(
+                topic,
+                topic_instruction,
+                style,
+                [
+                    ("たとえカエル", result.get("metaphor", {}) or {}),
+                    ("なまえカエル", result.get("nickname", {}) or {}),
+                    ("ぎゃくてんカエル", result.get("twist", {}) or {}),
+                ],
+            )
+            if not alignment.get("passed", False):
+                last_problems.append("お題の一般認識とのずれ:" + str(alignment.get("reason", "")))
+
         if logic_mode == "sarcasm":
             for key in ("metaphor", "nickname", "twist"):
                 item = result.get(key, {}) or {}
@@ -1128,6 +1221,7 @@ def player_answers(topic, style):
 def reference_answer(topic, style):
     """Create one pedagogical reference answer with a child-friendly explanation."""
     style_instruction = player_style_instruction(style)
+    topic_instruction = player_topic_instruction(topic)
     logic_mode = style_logic_mode(style, style_instruction)
     properties = {
         "answer": {"type": "string"},
@@ -1156,6 +1250,9 @@ def reference_answer(topic, style):
 【お題】
 {topic}
 
+【このお題の一般的な意味・定番イメージ】
+{topic_instruction}
+
 【言い方カード】
 {style}
 
@@ -1163,6 +1260,11 @@ def reference_answer(topic, style):
 {style_instruction}
 
 {sarcasm_generation_rules() if logic_mode == "sarcasm" else ""}
+
+【お題の扱い】
+- 「このお題の一般的な意味・定番イメージ」を必ず発想の出発点にする。
+- ひねるのは見方・価値づけ・たとえであり、定番の事実そのものを反対にしない。
+- 逆転や皮肉でも、一般的な前提を打ち消して別物にするのではなく、その前提を残したまま見え方を変える。
 
 【最重要】
 - 参考回答は1つだけ。
@@ -1228,6 +1330,15 @@ try_it: 自分で考えるためのコツ1つ
             last_problems.append("日本語以外の文字を使用")
         if not str(result.get("answer", "")).strip():
             last_problems.append("参考回答が空")
+        if not last_problems:
+            alignment = review_topic_alignment(
+                topic,
+                topic_instruction,
+                style,
+                [("参考回答", {"answer": result.get("answer", ""), "explanation": result.get("explanation", "")})],
+            )
+            if not alignment.get("passed", False):
+                last_problems.append("お題の一般認識とのずれ:" + str(alignment.get("reason", "")))
         if logic_mode == "sarcasm":
             if not str(result.get("surface_meaning", "")).strip() or not str(result.get("hidden_meaning", "")).strip():
                 last_problems.append("皮肉の表と裏の意味が不足")
@@ -1288,6 +1399,7 @@ def is_child_player_name(name):
 
 
 def judge_answers(topic, style, players):
+    topic_instruction = player_topic_instruction(topic)
     eligible = [p for p in players if is_meaningful_judge_answer(p.get("answer", ""))]
     if not eligible:
         raise ValueError("判定できる回答がありません。『わからない』『パス』以外の回答を1つ以上入れてください。")
@@ -1327,6 +1439,9 @@ def judge_answers(topic, style, players):
 【お題カード】
 {topic}
 
+【お題の一般的な意味・定番イメージ】
+{topic_instruction}
+
 【言い方カード】
 {style}
 
@@ -1338,6 +1453,7 @@ def judge_answers(topic, style, players):
 
 【理由の作り方】
 - 指定された『言い方』とのつながり、発想の面白さ、イメージしやすさなどから、実際に当てはまる良い点を1つ見つける。
+- お題の一般的な意味や定番イメージと明らかに食い違う点を、良い点として無理に説明しない。
 - 無理に大げさに褒めない。
 - 他の人の回答には触れない。
 - 難しい言葉は使わない。
