@@ -633,36 +633,44 @@ def support_answer(topic, style, child_request, level, previous_message=""):
     )
 
 
-def explain_topic_for_child(topic):
-    """Explain only the topic card in simple Japanese without giving a game answer."""
+def explain_topic_and_style_for_child(topic, style):
+    """Explain the topic card and the style card in simple Japanese without giving a game answer."""
     schema = {
         "type": "object",
         "properties": {
-            "meaning": {"type": "string"},
-            "example": {"type": "string"},
+            "topic_meaning": {"type": "string"},
+            "topic_example": {"type": "string"},
+            "style_meaning": {"type": "string"},
         },
-        "required": ["meaning", "example"],
+        "required": ["topic_meaning", "topic_example", "style_meaning"],
         "additionalProperties": False,
     }
 
+    style_instruction = player_style_instruction(style)
     base_prompt = f"""
-あなたは、5〜6歳の子どもにカードゲーム「言いカエル」のお題の意味だけを説明する先生役です。
+あなたは、5〜6歳の子どもにカードゲーム「言いカエル」のカードの意味をやさしく説明する先生役です。
 
-【今回のお題】
+【今回のお題カード】
 {topic}
 
+【今回の言い方カード】
+{style}
+
+【言い方カードの内部方針】
+{style_instruction}
+
 【目的】
-子どもが「このお題は、どんなもの・人・場面のことなのか」を頭に絵として思い浮かべられるようにしてください。
-ここではゲームの答えや言い換えを考えてはいけません。お題の意味を理解するための説明だけをします。
+子どもが、まず「お題カードは何のことか」を頭に絵として思い浮かべ、次に「言い方カードは、どんな感じの言い方を求めているのか」を理解できるようにしてください。
+ここではゲームの完成回答は作りません。お題の答え、言い換えの完成例、勝ち方につながる具体的な答えは出さず、カードの意味だけを説明します。
 
 【ルール】
 - 5〜6歳に話しかける自然な日本語にする。
-- meaning は1〜2文。難しい言葉を使わず、まず意味を説明する。
-- example は1文。日常で想像しやすい具体的な場面を1つだけ出す。
-- 全体を音声で20秒前後で聞ける程度に短くする。
-- 「つまり」「たとえば」を使ってもよい。
-- 言い方カードには触れない。
-- 言い換えの完成例、ヒント、面白い答え、勝ち方は出さない。
+- topic_meaning は1〜2文。難しい言葉を使わず、お題がどんなもの・人・場面かを説明する。
+- topic_example は1文。日常で想像しやすい具体的な場面を1つだけ出す。
+- style_meaning は1〜2文。言い方カードが「どんな見方・雰囲気・表し方を求めているか」を子ども向けに説明する。
+- style_meaning では、今回のお題に対する完成回答や、そのまま使える言い換え例は絶対に出さない。
+- 言い方カードの表面的な語尾・擬音だけを説明するのではなく、内部方針を踏まえて「どういう見方をする言い方なのか」をやさしく説明する。
+- 全体を音声で30秒前後で聞ける程度に短くする。
 - 子どもを評価したり褒めたりしない。
 - 日本語の漢字・ひらがな・カタカナ・数字・一般的な句読点だけを使う。
 - 外国語や日本語以外の文字体系、アルファベットを混ぜない。
@@ -678,26 +686,32 @@ def explain_topic_for_child(topic):
             )
         result = ask_json(
             base_prompt + retry,
-            "topic_explanation",
+            "topic_and_style_explanation",
             schema,
-            max_output_tokens=350,
+            max_output_tokens=480,
         )
         last_result = result
-        joined = f"{result.get('meaning', '')} {result.get('example', '')}"
+        joined = " ".join(
+            str(result.get(key, ""))
+            for key in ("topic_meaning", "topic_example", "style_meaning")
+        )
         if not non_japanese_letters(joined):
             return result
 
-    return last_result or {"meaning": "", "example": ""}
+    return last_result or {"topic_meaning": "", "topic_example": "", "style_meaning": ""}
 
 
 def topic_explanation_speech_text(item):
-    meaning = str((item or {}).get("meaning", "")).strip()
-    example = str((item or {}).get("example", "")).strip()
+    topic_meaning = str((item or {}).get("topic_meaning", "")).strip()
+    topic_example = str((item or {}).get("topic_example", "")).strip()
+    style_meaning = str((item or {}).get("style_meaning", "")).strip()
     parts = []
-    if meaning:
-        parts.append(meaning)
-    if example:
-        parts.append(f"たとえば、{example}")
+    if topic_meaning:
+        parts.append(f"まず、お題のせつめい。{topic_meaning}")
+    if topic_example:
+        parts.append(f"たとえば、{topic_example}")
+    if style_meaning:
+        parts.append(f"つぎに、言い方のせつめい。{style_meaning}")
     return " ".join(parts)
 
 
@@ -705,9 +719,9 @@ def log_topic_explanation(item):
     """Keep the existing per-round support history useful after simplifying the UI."""
     message = topic_explanation_speech_text(item)
     event = {
-        "request": "お題を解説して",
+        "request": "お題と言い方を解説して",
         "level": 0,
-        "need_type": "topic_explanation",
+        "need_type": "topic_and_style_explanation",
         "message": message,
         "words": [],
     }
@@ -1656,7 +1670,7 @@ verify_setup()
 require_family_pin()
 
 st.title("🐸 言いカエル おたすけAI")
-st.caption("お題解説・参考回答・AI審判・AIプレイヤーの4つの使い方ができます。")
+st.caption("お題・言い方の解説、参考回答、AI審判、AIプレイヤーの4つの使い方ができます。")
 st.caption("※ 読み上げ音声はAIが生成した音声です。")
 
 pages = ["あそぶ", "これまで"] if history_enabled() else ["あそぶ"]
@@ -1768,22 +1782,25 @@ st.markdown(
 
 # -------------------- Support mode --------------------
 st.subheader("① こまったときのサポート")
-st.caption("お題の意味が分からないときに使います。ボタンを押すだけで、子ども向けの短い解説が音声で流れます。ゲームの答えやヒントは出しません。")
+st.caption("お題と言い方カードの意味が分からないときに使います。ボタンを押すだけで、両方の説明が子ども向けの音声で流れます。ゲームの完成回答は出しません。")
 
-if st.button("🔊 お題を解説して！", use_container_width=True):
+if st.button("🔊 お題と言い方を解説して！", use_container_width=True):
     try:
-        with st.spinner("お題を分かりやすく説明しています…"):
-            item = explain_topic_for_child(st.session_state.topic)
+        with st.spinner("お題と言い方を分かりやすく説明しています…"):
+            item = explain_topic_and_style_for_child(
+                st.session_state.topic,
+                st.session_state.style,
+            )
             audio_text = topic_explanation_speech_text(item)
             if not audio_text:
-                raise ValueError("お題の解説が空でした。")
+                raise ValueError("お題と言い方の解説が空でした。")
             st.session_state.topic_explanation = item
             st.session_state.topic_explanation_audio = speech_bytes(audio_text)
             st.session_state.topic_explanation_autoplay_pending = True
             log_topic_explanation(item)
         st.rerun()
     except Exception as exc:
-        st.error("お題を解説できませんでした。もう一度試してください。")
+        st.error("お題と言い方を解説できませんでした。もう一度試してください。")
         with st.expander("保護者向け詳細"):
             st.code(str(exc))
 
@@ -1793,9 +1810,11 @@ if st.session_state.topic_explanation:
         f"""
         <div class="support-card">
           <b>お題のせつめい</b><br><br>
-          {item.get('meaning', '')}<br><br>
+          {item.get('topic_meaning', '')}<br><br>
           <b>たとえば</b><br>
-          {item.get('example', '')}
+          {item.get('topic_example', '')}<br><br>
+          <b>言い方のせつめい</b><br><br>
+          {item.get('style_meaning', '')}
         </div>
         """,
         unsafe_allow_html=True,
