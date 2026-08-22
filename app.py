@@ -23,7 +23,7 @@ except Exception:
 
 # ============================================================
 # Basic settings
-# v17: player answers are validated to use Japanese writing only.
+# v18: random card draw + separate AI reference-answer mode + four-section layout.
 # ============================================================
 st.set_page_config(
     page_title="言いカエル おたすけAI",
@@ -1034,6 +1034,9 @@ DEFAULTS = {
     "ai_audio": None,
     "ai_audio_autoplay_pending": False,
     "ai_images": {},
+    "reference_answers": None,
+    "reference_audio": None,
+    "reference_audio_autoplay_pending": False,
     "support_open": False,
     "support_request": "",
     "support_level": 0,
@@ -1159,6 +1162,51 @@ def audio_digest(uploaded_file):
         return ""
 
 
+def preset_card_selection(field_key, audio_key, selected_text):
+    """Preset one private Supabase card as if it had been selected from voice candidates."""
+    transcript_key = f"_{field_key}_transcript"
+    candidates_key = f"_{field_key}_candidates"
+    digest_key = f"_{audio_key}_digest"
+    radio_key = f"_{field_key}_radio"
+    manual_key = f"_{field_key}_manual"
+
+    # Clear a prior recorder value so an old recording does not overwrite the random draw.
+    st.session_state.pop(audio_key, None)
+    st.session_state.pop(digest_key, None)
+    st.session_state.pop(manual_key, None)
+    st.session_state[transcript_key] = "ランダムで選びました"
+    st.session_state[candidates_key] = [selected_text]
+    st.session_state[radio_key] = selected_text
+
+
+def choose_random_round_cards(round_serial):
+    rows = load_card_rows()
+    topics = [
+        row["card_text"]
+        for row in rows
+        if row["card_type"] == "topic" and not row.get("is_free_topic", False)
+    ]
+    styles = [row["card_text"] for row in rows if row["card_type"] == "style"]
+    if not topics or not styles:
+        raise ValueError("ランダムに選べるカードがありません。")
+
+    topic = random.choice(topics)
+    style = random.choice(styles)
+    preset_card_selection(
+        f"topic_draft_{round_serial}",
+        f"topic_audio_{round_serial}",
+        topic,
+    )
+    preset_card_selection(
+        f"style_draft_{round_serial}",
+        f"style_audio_{round_serial}",
+        style,
+    )
+    # ANY自由入力の残骸があれば消す。
+    st.session_state.pop(f"any_topic_{round_serial}", None)
+    return topic, style
+
+
 def voice_select_card(field_key, audio_key, label, card_type, context=""):
     transcript_key = f"_{field_key}_transcript"
     candidates_key = f"_{field_key}_candidates"
@@ -1204,7 +1252,9 @@ def voice_select_card(field_key, audio_key, label, card_type, context=""):
         return ""
 
     transcript = str(st.session_state.get(transcript_key, "")).strip()
-    if transcript:
+    if transcript == "ランダムで選びました":
+        st.caption("🎲 ランダムで選びました。")
+    elif transcript:
         st.caption(f"いちばん近く聞こえた音：{transcript}")
 
     options = candidates + ["どれもちがう"]
@@ -1417,7 +1467,7 @@ verify_setup()
 require_family_pin()
 
 st.title("🐸 言いカエル おたすけAI")
-st.caption("困ったときはヒント係。AIもプレイヤー。最後はAIが審判もできます。")
+st.caption("ヒント・参考回答・AI審判・AIプレイヤーの4つの使い方ができます。")
 st.caption("※ 読み上げ音声はAIが生成した音声です。")
 
 pages = ["あそぶ", "これまで"] if history_enabled() else ["あそぶ"]
@@ -1449,8 +1499,22 @@ if page == "これまで":
 
 if not st.session_state.round_active:
     st.subheader("カードをセット")
-    st.caption("非公開のカード一覧から、声の音に近い実在カードだけを候補表示します。実物と同じ言葉を選んでください。")
+    st.caption("声で実物のカードを選ぶか、Supabaseの非公開カード一覧からランダムに1組選べます。")
 
+    if st.button(
+        "🎲 お題と言い方をランダムに選ぶ",
+        use_container_width=True,
+        key=f"random_cards_{st.session_state.round_serial}",
+    ):
+        try:
+            choose_random_round_cards(st.session_state.round_serial)
+            st.rerun()
+        except Exception as exc:
+            st.error("カードをランダムに選べませんでした。")
+            with st.expander("保護者向け詳細"):
+                st.code(str(exc))
+
+    st.caption("または、カードを声で読むと、音の近い実在カードだけを候補表示します。")
     base_context = "カードゲーム『言いカエル』のカードを読み上げています。短い語句として、聞こえた音をできるだけそのまま文字起こししてください。"
     topic = voice_select_card(
         field_key=f"topic_draft_{st.session_state.round_serial}",
@@ -1472,7 +1536,7 @@ if not st.session_state.round_active:
             placeholder="出題者が考えた今回のお題",
             key=f"any_topic_{st.session_state.round_serial}",
         ).strip()
-    ai_join = st.checkbox("AIもこのラウンドに参加する", value=True)
+    ai_join = st.checkbox("④ AIもこのラウンドに参加する", value=True)
 
     if st.button("このお題ではじめる", type="primary", use_container_width=True):
         topic = str(topic).strip()
@@ -1600,8 +1664,75 @@ else:
 st.divider()
 
 
+# -------------------- AI reference-answer mode --------------------
+st.subheader("② AIの参考回答")
+st.caption(
+    "人が考えるときの見本として、AIが3方向の参考回答をその場で作ります。"
+    "④のAIプレイヤーとは別に生成するため、AIプレイヤーの伏せ回答は見えません。"
+)
+
+if st.session_state.reference_answers is None:
+    if st.button("💡 AIの参考回答を見る", use_container_width=True):
+        try:
+            with st.spinner("参考になる言い換えを考えています…"):
+                st.session_state.reference_answers = player_answers(
+                    st.session_state.topic,
+                    st.session_state.style,
+                )
+            st.session_state.reference_audio = None
+            st.session_state.reference_audio_autoplay_pending = False
+            st.rerun()
+        except Exception as exc:
+            st.error("参考回答を作れませんでした。もう一度試してください。")
+            with st.expander("保護者向け詳細"):
+                st.code(str(exc))
+else:
+    render_player_answers(st.session_state.reference_answers, allow_image_generation=False)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔊 参考回答を聞く", use_container_width=True):
+            try:
+                with st.spinner("声を作っています…"):
+                    st.session_state.reference_audio = speech_bytes(
+                        player_speech_text(st.session_state.reference_answers)
+                    )
+                st.session_state.reference_audio_autoplay_pending = True
+                st.rerun()
+            except Exception as exc:
+                st.error("読み上げ音声を作れませんでした。")
+                with st.expander("保護者向け詳細"):
+                    st.code(str(exc))
+    with c2:
+        if st.button("↻ 別の参考回答", use_container_width=True):
+            try:
+                with st.spinner("別の見方を考えています…"):
+                    st.session_state.reference_answers = player_answers(
+                        st.session_state.topic,
+                        st.session_state.style,
+                    )
+                st.session_state.reference_audio = None
+                st.session_state.reference_audio_autoplay_pending = False
+                st.rerun()
+            except Exception as exc:
+                st.error("参考回答を作れませんでした。もう一度試してください。")
+                with st.expander("保護者向け詳細"):
+                    st.code(str(exc))
+
+    if st.session_state.reference_audio:
+        st.audio(
+            st.session_state.reference_audio,
+            format="audio/wav",
+            autoplay=bool(st.session_state.reference_audio_autoplay_pending),
+        )
+        st.session_state.reference_audio_autoplay_pending = False
+
+
+st.divider()
+
+
 # -------------------- Judging mode --------------------
-st.subheader("② AI審判・採点モード")
+st.subheader("③ AI審判・採点モード")
 st.caption("明らかな無回答を除いて判定します。子どもが有効な回答をしている回は、子どもが約50%の確率で1位になります。残りはほかの参加者からランダムに選び、AIが良かった理由を説明します。点数は付けません。")
 
 serial = st.session_state.round_serial
@@ -1701,7 +1832,7 @@ if st.session_state.judge_result:
 st.divider()
 
 # -------------------- AI player mode --------------------
-st.subheader("③ AIもゲームに参加")
+st.subheader("④ AIもゲームに参加")
 st.caption("AIは『たとえ・なまえ・ぎゃくてん』の3方向で答えます。")
 
 if not st.session_state.ai_joined:
