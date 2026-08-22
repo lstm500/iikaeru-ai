@@ -23,7 +23,7 @@ except Exception:
 
 # ============================================================
 # Basic settings
-# v18: random card draw + separate AI reference-answer mode + four-section layout.
+# v19: one pedagogical AI reference answer + random card draw + four-section layout.
 # ============================================================
 st.set_page_config(
     page_title="言いカエル おたすけAI",
@@ -839,6 +839,106 @@ def player_answers(topic, style):
     raise ValueError("日本語だけで、お題の文言をそのまま使わない回答を作れませんでした。もう一度AIの回答を生成してください。")
 
 
+def reference_answer(topic, style):
+    """Create one pedagogical reference answer with a child-friendly explanation."""
+    style_instruction = player_style_instruction(style)
+    schema = {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "explanation": {"type": "string"},
+            "try_it": {"type": "string"},
+        },
+        "required": ["answer", "explanation", "try_it"],
+        "additionalProperties": False,
+    }
+
+    base_prompt = f"""
+あなたは、5〜6歳の子どもがカードゲーム「言いカエル」の発想のしかたを学ぶための先生役です。
+完成回答をたくさん見せるのではなく、参考回答は1つだけ出してください。
+そして「どうしてその言葉を思いついたのか」を、子どもが次に自分でまねできるように説明してください。
+
+【お題】
+{topic}
+
+【言い方カード】
+{style}
+
+【この言い方カードの狙い】
+{style_instruction}
+
+【最重要】
+- 参考回答は1つだけ。
+- 答えの巧さよりも、発想のしかたを教えることを重視する。
+- 一休さんのように、普通の見方を1回だけずらして「なるほど」と思えるウィットにする。
+- 言い方カードは表面の語尾・擬音・派手な言葉ではなく、「どう見直すか」の条件として使う。
+- お題カードの文言「{topic}」を answer にそのまま使わない。
+- answer は原則ワンフレーズ、最大でも短いツーフレーズ。30文字以内を目安にする。
+- 5〜6歳が頭に絵を浮かべられ、少し笑える内容にする。
+- 難しい熟語や大人だけに分かる皮肉は避ける。
+- 日本語の漢字・ひらがな・カタカナ・数字・一般的な句読点だけを使う。外国語文字やアルファベットは使わない。
+
+【explanation の作り方】
+- 内部の細かい思考手順を列挙するのではなく、子ども向けの短い学習解説にする。
+- 2〜3文程度。
+- 「お題の○○というところを見たよ。そこを△△みたいに見方を変えたよ。だから□□という言葉にしたよ。」のように、
+  ①どの特徴を見たか、②どう見方を変えたか、③言い方カードにどう合わせたか、が分かるようにする。
+- 「なぜ面白いか」も、子どもが分かる言葉で一言入れてよい。
+
+【try_it の作り方】
+- 次に子ども自身が別の答えを作るためのコツを1文だけ。
+- 完成回答をもう1つ出してはいけない。
+- 例：「お題の特徴を、別のものの仕事に置きかえてみよう」のように、考え方だけを渡す。
+
+【出力】
+answer: 参考回答1つ
+explanation: 子ども向けの発想解説
+try_it: 自分で考えるためのコツ1つ
+""".strip()
+
+    def topic_is_reused(answer):
+        answer_text = str(answer or "").replace(" ", "").replace("　", "")
+        topic_text = str(topic or "").replace(" ", "").replace("　", "")
+        return bool(topic_text and topic_text in answer_text)
+
+    last_problems = []
+    for attempt in range(4):
+        retry_note = ""
+        if attempt:
+            retry_note = (
+                "\n\n【作り直し】\n"
+                + "、".join(last_problems)
+                + "の条件に違反しました。答えは1つだけにし、日本語だけで、"
+                "お題の言葉をそのまま使わず、子どもに発想のしかたが伝わる形へ作り直してください。"
+            )
+
+        result = ask_json(
+            base_prompt + retry_note,
+            "reference_answer",
+            schema,
+            max_output_tokens=520,
+        )
+        last_problems = []
+        if topic_is_reused(result.get("answer", "")):
+            last_problems.append("お題の文言をそのまま使用")
+        if any(non_japanese_letters(result.get(key, "")) for key in ("answer", "explanation", "try_it")):
+            last_problems.append("日本語以外の文字を使用")
+        if not str(result.get("answer", "")).strip():
+            last_problems.append("参考回答が空")
+        if not last_problems:
+            return result
+
+    raise ValueError("子ども向けの参考回答を作れませんでした。もう一度試してください。")
+
+
+def reference_speech_text(item):
+    return (
+        f"参考回答は、{item['answer']}。"
+        f"どう考えたかというと、{item['explanation']}。"
+        f"自分で考えるコツは、{item['try_it']}。"
+    )
+
+
 def player_speech_text(answers):
     return (
         f"たとえカエル。{answers['metaphor']['answer']}。"
@@ -1034,7 +1134,7 @@ DEFAULTS = {
     "ai_audio": None,
     "ai_audio_autoplay_pending": False,
     "ai_images": {},
-    "reference_answers": None,
+    "reference_answer": None,
     "reference_audio": None,
     "reference_audio_autoplay_pending": False,
     "support_open": False,
@@ -1667,15 +1767,15 @@ st.divider()
 # -------------------- AI reference-answer mode --------------------
 st.subheader("② AIの参考回答")
 st.caption(
-    "人が考えるときの見本として、AIが3方向の参考回答をその場で作ります。"
+    "参考回答は1つだけ。答えそのものより、『どこを見て、どう見方を変えたか』を子ども向けに説明します。"
     "④のAIプレイヤーとは別に生成するため、AIプレイヤーの伏せ回答は見えません。"
 )
 
-if st.session_state.reference_answers is None:
+if st.session_state.reference_answer is None:
     if st.button("💡 AIの参考回答を見る", use_container_width=True):
         try:
-            with st.spinner("参考になる言い換えを考えています…"):
-                st.session_state.reference_answers = player_answers(
+            with st.spinner("答えと考え方を1つ作っています…"):
+                st.session_state.reference_answer = reference_answer(
                     st.session_state.topic,
                     st.session_state.style,
                 )
@@ -1687,15 +1787,35 @@ if st.session_state.reference_answers is None:
             with st.expander("保護者向け詳細"):
                 st.code(str(exc))
 else:
-    render_player_answers(st.session_state.reference_answers, allow_image_generation=False)
+    item = st.session_state.reference_answer
+    st.markdown(
+        f"""
+        <div class="answer-card">
+          <div class="small-note">参考回答</div>
+          <div class="answer-main">{item['answer']}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="support-card">
+          <b>どう考えたの？</b><br><br>
+          {item['explanation']}<br><br>
+          <b>自分で考えるコツ</b><br>
+          {item['try_it']}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🔊 参考回答を聞く", use_container_width=True):
+        if st.button("🔊 答えと考え方を聞く", use_container_width=True):
             try:
                 with st.spinner("声を作っています…"):
                     st.session_state.reference_audio = speech_bytes(
-                        player_speech_text(st.session_state.reference_answers)
+                        reference_speech_text(item)
                     )
                 st.session_state.reference_audio_autoplay_pending = True
                 st.rerun()
@@ -1706,8 +1826,8 @@ else:
     with c2:
         if st.button("↻ 別の参考回答", use_container_width=True):
             try:
-                with st.spinner("別の見方を考えています…"):
-                    st.session_state.reference_answers = player_answers(
+                with st.spinner("別の見方を1つ考えています…"):
+                    st.session_state.reference_answer = reference_answer(
                         st.session_state.topic,
                         st.session_state.style,
                     )
@@ -1726,7 +1846,6 @@ else:
             autoplay=bool(st.session_state.reference_audio_autoplay_pending),
         )
         st.session_state.reference_audio_autoplay_pending = False
-
 
 st.divider()
 
