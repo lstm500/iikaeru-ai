@@ -10,6 +10,7 @@ import hashlib
 import random
 import base64
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -23,7 +24,7 @@ except Exception:
 
 # ============================================================
 # Basic settings
-# v26: poetic-style answers use a strict topic-anchor -> shared-feature -> metaphor bridge.
+# v29: two AI frogs; crayon/dessin image generation is parallelized for faster display.
 # ============================================================
 st.set_page_config(
     page_title="言いカエル おたすけAI",
@@ -442,7 +443,11 @@ def speech_bytes(text):
                 pass
 
 
-def generate_player_image(topic, style, label, answer, why):
+def generate_player_image(topic, style, label, answer, why, art_style="crayon"):
+    art_instruction = {
+        "crayon": "Use a child-friendly crayon drawing style with thick waxy strokes, bright colors, and a playful picture-book feeling.",
+        "dessin": "Use a child-friendly colored pencil sketch / dessin style with hand-drawn shading, soft lines, and a lightly realistic but warm look.",
+    }.get(art_style, "Use a child-friendly picture-book illustration style.")
     prompt = f"""
 Create one square illustration for a Japanese family word-play card game.
 The viewer is a 5- to 6-year-old child.
@@ -457,7 +462,7 @@ Requirements:
 - Make the AI phrase immediately understandable as a funny visual scene.
 - Strongly reflect the mood/form of the style card: {style}.
 - Keep the humor playful, surprising, and easy for a young child to understand.
-- Use a cute, friendly, colorful picture-book illustration style.
+- {art_instruction}
 - If the style is scary, sarcastic, harsh, or sad, keep it child-safe and gentle rather than disturbing or cruel.
 - Do not mock body shape, appearance, disability, race, gender, or other personal traits.
 - Do not use copyrighted characters, brand mascots, logos, or recognizable franchises.
@@ -479,8 +484,48 @@ Requirements:
     return base64.b64decode(encoded)
 
 
-def generate_reference_image(topic, style, answer, explanation):
-    return generate_player_image(topic, style, "参考回答", answer, explanation)
+def generate_dual_images(topic, style, label, answer, why):
+    """Generate crayon and dessin images in parallel to reduce wait time."""
+    jobs = {
+        "crayon": ("crayon",),
+        "dessin": ("dessin",),
+    }
+    images = {}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            key: executor.submit(
+                generate_player_image,
+                topic,
+                style,
+                label,
+                answer,
+                why,
+                art_style,
+            )
+            for key, (art_style,) in jobs.items()
+        }
+        for key, future in futures.items():
+            images[key] = future.result()
+    return images
+
+
+def generate_reference_images(topic, style, answer, explanation):
+    return generate_dual_images(topic, style, "参考回答", answer, explanation)
+
+
+def generate_reference_assets(topic, style, item):
+    """Generate the two pictures and narration concurrently."""
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_crayon = executor.submit(
+            generate_player_image, topic, style, "参考回答", item["answer"], item["explanation"], "crayon"
+        )
+        f_dessin = executor.submit(
+            generate_player_image, topic, style, "参考回答", item["answer"], item["explanation"], "dessin"
+        )
+        f_audio = executor.submit(speech_bytes, reference_speech_text(item))
+        images = {"crayon": f_crayon.result(), "dessin": f_dessin.result()}
+        audio = f_audio.result()
+    return images, audio
 
 
 def card_candidates(raw_text, card_type):
@@ -1404,6 +1449,263 @@ def player_answers(topic, style):
     raise ValueError("日本語だけで、お題の文言をそのまま使わない回答を作れませんでした。もう一度AIの回答を生成してください。")
 
 
+def ai_game_answer(topic, style):
+    """Create one playful AI answer for game participation."""
+    style_instruction = player_style_instruction(style)
+    topic_instruction = player_topic_instruction(topic)
+    logic_mode = style_logic_mode(style, style_instruction)
+    properties = {
+        "answer": {"type": "string"},
+        "why": {"type": "string"},
+    }
+    required = ["answer", "why"]
+    if logic_mode == "sarcasm":
+        properties.update({
+            "surface_meaning": {"type": "string"},
+            "hidden_meaning": {"type": "string"},
+        })
+        required.extend(["surface_meaning", "hidden_meaning"])
+    schema = {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+    base_prompt = f"""
+あなたは、5〜6歳の子どもと親が遊ぶカードゲーム「言いカエル」に参加するAIです。
+AIは1人ぶんの回答を1つだけ出します。
+最優先は、子どもが聞いてすぐ場面を想像できて、クスッと笑えることです。
+ただし、意味不明な奇抜さではなく、お題と言い方カードにちゃんと沿っている必要があります。
+
+【お題】
+{topic}
+
+【このお題の一般的な意味・定番イメージ】
+{topic_instruction}
+
+【言い方カード】
+{style}
+
+【この言い方カードの意味・狙い】
+{style_instruction}
+
+{sarcasm_generation_rules() if logic_mode == "sarcasm" else poetic_generation_rules() if logic_mode == "poetic" else ""}
+
+【方針】
+- まず、お題の一般的なイメージを土台にする。
+- そのうえで、見方・役割・たとえ・場面のどれかを1回だけずらして面白くする。
+- 子どもにとって、頭に絵が浮かぶ具体性を大切にする。
+- 「言い方カードに沿っていること」と「子どもに面白いこと」の両方を満たす。
+- ただ語尾を変えるだけ、ただ派手な言葉を足すだけ、ただ称号をつけるだけは禁止。
+- お題カードの文言「{topic}」を answer にそのまま使わない。
+- answer はワンフレーズ、または短いツーフレーズ。30文字以内を目安にする。
+- why は子ども向けに1〜2文で、「どこが面白いか」「どこをどう見方を変えたか」を簡単に説明する。
+- 皮肉のときは、やさしすぎず、ほめている形の中に軽いトゲとキレを残す。ただし子ども向けなので過度にきつくしない。
+- 詩的のときは、お題と比喩先の共通点がちゃんと分かるようにする。
+- 日本語以外の文字は使わない。
+
+【内部で比較すること】
+- 少なくとも8案を内部で考え、最も「子どもが笑える」「言い方カードに合う」「お題からずれていない」案を1つ選ぶ。
+- 面白さを優先してよいが、意味不明なナンセンスは不可。
+
+【出力】
+answer: AIの回答1つ
+why: 子ども向けの短い解説
+""".strip()
+
+    def topic_is_reused(answer):
+        answer_text = str(answer or "").replace(" ", "").replace("　", "")
+        topic_text = str(topic or "").replace(" ", "").replace("　", "")
+        return bool(topic_text and topic_text in answer_text)
+
+    last_problems = []
+    for attempt in range(4):
+        retry_note = ""
+        if attempt:
+            retry_note = (
+                "\n\n【作り直し】\n"
+                + "、".join(last_problems)
+                + "の条件に違反しました。もっと子どもが笑いやすく、"
+                "ただしお題と言い方カードからはずれない1回答へ作り直してください。"
+            )
+        result = ask_json(
+            base_prompt + retry_note,
+            "ai_game_answer",
+            schema,
+            max_output_tokens=360,
+        )
+        last_problems = []
+        answer_text = str(result.get("answer", "")).strip()
+        why_text = str(result.get("why", "")).strip()
+        if not answer_text:
+            last_problems.append("回答が空")
+        if not why_text:
+            last_problems.append("解説が空")
+        if topic_is_reused(answer_text):
+            last_problems.append("お題の文言をそのまま使用")
+        if any(non_japanese_letters(result.get(key, "")) for key in ("answer", "why")):
+            last_problems.append("日本語以外の文字を使用")
+        if not last_problems:
+            alignment = review_topic_alignment(
+                topic,
+                topic_instruction,
+                style,
+                [("AI回答", {"answer": answer_text, "why": why_text})],
+            )
+            if not alignment.get("passed", False):
+                last_problems.append("お題の一般認識とのずれ:" + str(alignment.get("reason", "")))
+        if logic_mode == "sarcasm" and not last_problems:
+            if not str(result.get("surface_meaning", "")).strip() or not str(result.get("hidden_meaning", "")).strip():
+                last_problems.append("皮肉の表と裏の意味が不足")
+        elif logic_mode == "poetic" and not last_problems:
+            passed, reason = review_poetic_reference(topic, topic_instruction, {
+                "answer": answer_text,
+                "explanation": why_text,
+            })
+            if not passed:
+                last_problems.append("詩的比喩判定:" + (reason or "お題と比喩の共通点が弱い"))
+        if not last_problems:
+            return result
+    raise ValueError("AIの回答を作れませんでした。もう一度試してください。")
+
+
+def ai_game_answers(topic, style):
+    """Create two distinct, child-funny AI answers in one text request."""
+    style_instruction = player_style_instruction(style)
+    topic_instruction = player_topic_instruction(topic)
+    logic_mode = style_logic_mode(style, style_instruction)
+
+    item_properties = {
+        "answer": {"type": "string"},
+        "why": {"type": "string"},
+    }
+    item_required = ["answer", "why"]
+    if logic_mode == "sarcasm":
+        item_properties.update({
+            "surface_meaning": {"type": "string"},
+            "hidden_meaning": {"type": "string"},
+        })
+        item_required.extend(["surface_meaning", "hidden_meaning"])
+
+    item_schema = {
+        "type": "object",
+        "properties": item_properties,
+        "required": item_required,
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "frog1": item_schema,
+            "frog2": item_schema,
+        },
+        "required": ["frog1", "frog2"],
+        "additionalProperties": False,
+    }
+
+    prompt = f"""
+あなたは、5〜6歳の子どもと親が遊ぶカードゲーム「言いカエル」に参加するAIです。
+AIカエルは2匹いますが、カエルに名前は付けません。
+2匹がそれぞれ1つずつ、合計2つの別々の回答を出してください。
+
+【お題】
+{topic}
+
+【このお題の一般的な意味・定番イメージ】
+{topic_instruction}
+
+【言い方カード】
+{style}
+
+【この言い方カードの意味・狙い】
+{style_instruction}
+
+{sarcasm_generation_rules() if logic_mode == "sarcasm" else poetic_generation_rules() if logic_mode == "poetic" else ""}
+
+【最優先】
+- 5〜6歳の子どもが聞いて、場面をすぐ想像できて、クスッと笑える回答を優先する。
+- ただし、お題の一般的な意味と言い方カードから外れない。
+- 2匹の回答は発想の方向を変え、似た答えにしない。
+- 意味不明なナンセンスではなく、「そう来たか」と分かる面白さにする。
+- 見方・役割・たとえ・場面のどれかを1回だけずらす。
+- 語尾だけ、擬音だけ、派手な称号だけで面白く見せるのは禁止。
+- お題カードの文言「{topic}」を answer にそのまま使わない。
+- answer はワンフレーズまたは短いツーフレーズ、30文字以内を目安にする。
+- why は子ども向けに1〜2文で、どこが面白いのかを簡単に説明する。
+- 皮肉では、ほめている形の中に軽いトゲとキレを残す。ただし人格攻撃はしない。
+- 詩的では、お題と比喩先の共通点が子どもにも分かるようにする。
+- 日本語以外の文字を使わない。
+
+【内部での選び方】
+1匹につき少なくとも6案を内部で考え、
+「子どもの面白さ」「お題との一致」「言い方カードとの一致」「分かりやすさ」が高い案を1つずつ選ぶ。
+
+【出力】
+frog1: 1匹目の回答と解説
+frog2: 2匹目の回答と解説
+""".strip()
+
+    def topic_is_reused(answer):
+        answer_text = str(answer or "").replace(" ", "").replace("　", "")
+        topic_text = str(topic or "").replace(" ", "").replace("　", "")
+        return bool(topic_text and topic_text in answer_text)
+
+    last_problems = []
+    for attempt in range(4):
+        retry = ""
+        if attempt:
+            retry = (
+                "\n\n【作り直し】\n"
+                + "、".join(last_problems)
+                + "の条件に違反しました。2匹の発想をはっきり変え、もっと子どもが笑いやすく、"
+                "それでもお題と言い方カードに沿う回答へ作り直してください。"
+            )
+        result = ask_json(prompt + retry, "ai_game_answers_two", schema, max_output_tokens=620)
+        problems = []
+        items = [result.get("frog1", {}) or {}, result.get("frog2", {}) or {}]
+        answers = [str(x.get("answer", "")).strip() for x in items]
+        if any(not a for a in answers):
+            problems.append("回答が空")
+        if answers[0] and answers[1] and answers[0] == answers[1]:
+            problems.append("2匹の回答が同じ")
+        if any(topic_is_reused(a) for a in answers):
+            problems.append("お題の文言をそのまま使用")
+        for item in items:
+            if non_japanese_letters(item.get("answer", "")) or non_japanese_letters(item.get("why", "")):
+                problems.append("日本語以外の文字を使用")
+                break
+        if not problems:
+            alignment = review_topic_alignment(
+                topic,
+                topic_instruction,
+                style,
+                [
+                    ("1匹目", items[0]),
+                    ("2匹目", items[1]),
+                ],
+            )
+            if not alignment.get("passed", False):
+                problems.append("お題の一般認識とのずれ:" + str(alignment.get("reason", "")))
+        if logic_mode == "sarcasm" and not problems:
+            for i, item in enumerate(items, start=1):
+                if not str(item.get("surface_meaning", "")).strip() or not str(item.get("hidden_meaning", "")).strip():
+                    problems.append(f"{i}匹目の皮肉の表と裏の意味が不足")
+        elif logic_mode == "poetic" and not problems:
+            for i, item in enumerate(items, start=1):
+                passed, reason = review_poetic_reference(
+                    topic,
+                    topic_instruction,
+                    {"answer": item.get("answer", ""), "explanation": item.get("why", "")},
+                )
+                if not passed:
+                    problems.append(f"{i}匹目の詩的比喩判定:" + (reason or "共通点が弱い"))
+        if not problems:
+            return result
+        last_problems = problems
+
+    raise ValueError("2匹のAI回答を作れませんでした。もう一度試してください。")
+
+
 def reference_answer(topic, style):
     """Create one pedagogical reference answer with a child-friendly explanation."""
     style_instruction = player_style_instruction(style)
@@ -1494,9 +1796,6 @@ try_it: 自分で考えるためのコツ1つ
         if attempt:
             retry_note = (
                 "\n\n【作り直し】\n"
-                + "、".join(last_problems)
-                + "の条件に違反しました。答えは1つだけにし、日本語だけで、"
-                "お題の言葉をそのまま使わず、子どもに発想のしかたが伝わる形へ作り直してください。"
             )
             if logic_mode == "sarcasm":
                 retry_note += (
@@ -1562,135 +1861,62 @@ def reference_speech_text(item):
 
 def player_speech_text(answers):
     return (
-        f"たとえカエル。{answers['metaphor']['answer']}。"
-        f"その理由は、{answers['metaphor']['why']}。"
-        f"なまえカエル。{answers['nickname']['answer']}。"
-        f"その理由は、{answers['nickname']['why']}。"
-        f"ぎゃくてんカエル。{answers['twist']['answer']}。"
-        f"その理由は、{answers['twist']['why']}。"
+        f"1匹目の答えは、{answers['frog1']['answer']}。"
+        f"どうしてそう言ったかというと、{answers['frog1']['why']}。"
+        f"2匹目の答えは、{answers['frog2']['answer']}。"
+        f"どうしてそう言ったかというと、{answers['frog2']['why']}。"
     )
-
-
-def is_meaningful_judge_answer(answer):
-    """Exclude only obvious non-answers; keep ordinary weak/short answers eligible."""
-    raw = str(answer or "").strip()
-    compact = "".join(ch for ch in raw if ch not in " 　、。,.!?！？…・〜ー~")
-    if len(compact) < 2:
-        return False
-
-    lowered = compact.lower()
-    non_answers = [
-        "わからない", "分からない", "わかんない", "わかりません",
-        "思いつかない", "おもいつかない", "思いつきません",
-        "ありません", "ないです", "なし", "無回答", "パス",
-        "むり", "無理", "知らない", "しらない",
-    ]
-    return not any(phrase in lowered for phrase in non_answers)
-
-
-def is_child_player_name(name):
-    """Return True for ordinary labels used for a child player in family play."""
-    normalized = str(name or "").strip().lower().replace(" ", "").replace("　", "")
-    child_markers = [
-        "こども", "子ども", "子供", "お子さん", "おこさん",
-        "息子", "むすこ", "娘", "むすめ", "キッズ", "kid", "child",
-    ]
-    return any(marker.lower() in normalized for marker in child_markers)
-
-
-def judge_answers(topic, style, players):
-    topic_instruction = player_topic_instruction(topic)
-    eligible = [p for p in players if is_meaningful_judge_answer(p.get("answer", ""))]
-    if not eligible:
-        raise ValueError("判定できる回答がありません。『わからない』『パス』以外の回答を1つ以上入れてください。")
-
-    # Family-play weighting:
-    # - If a child has a meaningful answer, the child side wins about 50% of rounds.
-    # - The remaining ~50% is chosen randomly from the other meaningful answers.
-    # - With multiple children, the 50% child share is split randomly among them.
-    # - Obvious non-answers never receive the child weighting.
-    rng = random.SystemRandom()
-    child_eligible = [p for p in eligible if is_child_player_name(p.get("name", ""))]
-    other_eligible = [p for p in eligible if p not in child_eligible]
-
-    if child_eligible and other_eligible:
-        if rng.random() < 0.5:
-            winner = rng.choice(child_eligible)
-        else:
-            winner = rng.choice(other_eligible)
-    else:
-        winner = rng.choice(eligible)
-
-    schema = {
-        "type": "object",
-        "properties": {
-            "reason": {"type": "string"},
-        },
-        "required": ["reason"],
-        "additionalProperties": False,
-    }
-    result = ask_json(
-        f"""
-あなたは、家族で遊ぶカードゲーム『言いカエル』の審判です。
-今回はゲームとして1位の人はすでに抽選で決まっています。
-あなたの役目は、その回答の良いところを見つけて、子どもにも分かる理由を1文で説明することだけです。
-順位を選び直したり、他の回答と比較したりしないでください。
-
-【お題カード】
-{topic}
-
-【お題の一般的な意味・定番イメージ】
-{topic_instruction}
-
-【言い方カード】
-{style}
-
-【今回1位になった人】
-{winner['name']}
-
-【今回1位になった回答】
-{winner['answer']}
-
-【理由の作り方】
-- 指定された『言い方』とのつながり、発想の面白さ、イメージしやすさなどから、実際に当てはまる良い点を1つ見つける。
-- お題の一般的な意味や定番イメージと明らかに食い違う点を、良い点として無理に説明しない。
-- 無理に大げさに褒めない。
-- 他の人の回答には触れない。
-- 難しい言葉は使わない。
-- 1文だけにする。
-- 『〜からです。』で終える。
-""".strip(),
-        "judge_reason",
-        schema,
-        max_output_tokens=180,
-    )
-
-    return {
-        "winner_id": winner["id"],
-        "winner_name": winner["name"],
-        "winner_answer": winner["answer"],
-        "reason": result["reason"],
-        "eligible_count": len(eligible),
-    }
 
 
 def generate_ai_images(answers):
-    image_map = {}
-    label_map = {
-        "metaphor": "たとえカエル",
-        "nickname": "なまえカエル",
-        "twist": "ぎゃくてんカエル",
-    }
-    for key, label in label_map.items():
-        item = answers.get(key, {}) or {}
-        image_map[key] = generate_player_image(
-            st.session_state.topic,
-            st.session_state.style,
-            label,
-            str(item.get("answer", "")),
-            str(item.get("why", "")),
-        )
+    """Generate four pictures (2 frogs x 2 art styles) concurrently."""
+    jobs = []
+    for frog_key, label in (("frog1", "1匹目"), ("frog2", "2匹目")):
+        item = answers[frog_key]
+        for art_style in ("crayon", "dessin"):
+            jobs.append((frog_key, art_style, label, item))
+
+    image_map = {"frog1": {}, "frog2": {}}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {}
+        for frog_key, art_style, label, item in jobs:
+            future = executor.submit(
+                generate_player_image,
+                st.session_state.topic,
+                st.session_state.style,
+                label,
+                str(item.get("answer", "")),
+                str(item.get("why", "")),
+                art_style,
+            )
+            futures[(frog_key, art_style)] = future
+        for (frog_key, art_style), future in futures.items():
+            image_map[frog_key][art_style] = future.result()
     return image_map
+
+
+def generate_ai_assets(answers):
+    """Generate all four pictures and narration concurrently."""
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        image_futures = {}
+        for frog_key, label in (("frog1", "1匹目"), ("frog2", "2匹目")):
+            item = answers[frog_key]
+            for art_style in ("crayon", "dessin"):
+                image_futures[(frog_key, art_style)] = executor.submit(
+                    generate_player_image,
+                    st.session_state.topic,
+                    st.session_state.style,
+                    label,
+                    str(item.get("answer", "")),
+                    str(item.get("why", "")),
+                    art_style,
+                )
+        audio_future = executor.submit(speech_bytes, player_speech_text(answers))
+        image_map = {"frog1": {}, "frog2": {}}
+        for (frog_key, art_style), future in image_futures.items():
+            image_map[frog_key][art_style] = future.result()
+        audio = audio_future.result()
+    return image_map, audio
 
 
 def judge_speech_text(result):
@@ -1780,7 +2006,7 @@ DEFAULTS = {
     "ai_audio_autoplay_pending": False,
     "ai_images": {},
     "reference_answer": None,
-    "reference_image": None,
+    "reference_images": {},
     "reference_audio": None,
     "reference_audio_autoplay_pending": False,
     "topic_explanation": None,
@@ -2149,37 +2375,32 @@ def render_support_result():
             )
 
 
-def render_player_answers(answers):
-    labels = [
-        ("metaphor", "たとえカエル", "frog-yellow"),
-        ("nickname", "なまえカエル", "frog-blue"),
-        ("twist", "ぎゃくてんカエル", "frog-pink"),
-    ]
-    images = st.session_state.get("ai_images", {})
-    for key, label, color_class in labels:
-        item = answers[key]
-        existing = images.get(key)
-        if existing:
-            st.image(
-                existing,
-                caption=f"{label}：{item['answer']}",
-                use_container_width=True,
-            )
+def render_dual_images(images, prefix=""):
+    if not images:
+        return
+    col1, col2 = st.columns(2)
+    with col1:
+        if images.get("crayon"):
+            st.image(images["crayon"], caption=f"{prefix}クレヨン調", use_container_width=True)
+    with col2:
+        if images.get("dessin"):
+            st.image(images["dessin"], caption=f"{prefix}デッサン調", use_container_width=True)
+
+
+def render_ai_answers(answers, images):
+    for frog_key, index in (("frog1", 1), ("frog2", 2)):
+        item = answers[frog_key]
+        st.markdown(f"**🐸 {index}匹目**")
+        render_dual_images(images.get(frog_key, {}), prefix="")
         st.markdown(
             f"""
             <div class="answer-card">
-              <div class="answer-label-row">
-                <span class="frog-badge {color_class}">🐸</span>
-                <span class="answer-label-mini">{label}</span>
-              </div>
               <div class="answer-main">{item['answer']}</div>
               <div class="small-note">{item['why']}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        if item.get("new_word"):
-            st.caption(f"ことばメモ：{item['new_word']} ＝ {item['new_word_meaning']}")
 
 
 
@@ -2353,8 +2574,8 @@ st.divider()
 # -------------------- AI reference-answer mode --------------------
 st.subheader("② AIの参考回答")
 st.caption(
-    "参考回答は1つだけ。まず絵を出してから、答えと考え方を音声でやさしく説明します。"
-    "④のAIプレイヤーとは別に生成するため、AIプレイヤーの伏せ回答は見えません。"
+    "参考回答は1つだけ。クレヨン調とデッサン調の絵を先に2つ出し、そのあと答えと考え方を音声でやさしく説明します。"
+    "④のAI参加とは別に生成するため、④の答えは見えません。"
 )
 
 if st.session_state.reference_answer is None:
@@ -2365,15 +2586,13 @@ if st.session_state.reference_answer is None:
                     st.session_state.topic,
                     st.session_state.style,
                 )
-                image_bytes = generate_reference_image(
+                image_bytes, audio_bytes = generate_reference_assets(
                     st.session_state.topic,
                     st.session_state.style,
-                    item["answer"],
-                    item["explanation"],
+                    item,
                 )
-                audio_bytes = speech_bytes(reference_speech_text(item))
             st.session_state.reference_answer = item
-            st.session_state.reference_image = image_bytes
+            st.session_state.reference_images = image_bytes
             st.session_state.reference_audio = audio_bytes
             st.session_state.reference_audio_autoplay_pending = True
             st.rerun()
@@ -2383,12 +2602,7 @@ if st.session_state.reference_answer is None:
                 st.code(str(exc))
 else:
     item = st.session_state.reference_answer
-    if st.session_state.reference_image:
-        st.image(
-            st.session_state.reference_image,
-            caption=f"参考回答：{item['answer']}",
-            use_container_width=True,
-        )
+    render_dual_images(st.session_state.reference_images, prefix="")
     st.markdown(
         f"""
         <div class="answer-card">
@@ -2432,15 +2646,13 @@ else:
                         st.session_state.topic,
                         st.session_state.style,
                     )
-                    image_bytes = generate_reference_image(
+                    image_bytes, audio_bytes = generate_reference_assets(
                         st.session_state.topic,
                         st.session_state.style,
-                        item["answer"],
-                        item["explanation"],
+                        item,
                     )
-                    audio_bytes = speech_bytes(reference_speech_text(item))
                 st.session_state.reference_answer = item
-                st.session_state.reference_image = image_bytes
+                st.session_state.reference_images = image_bytes
                 st.session_state.reference_audio = audio_bytes
                 st.session_state.reference_audio_autoplay_pending = True
                 st.rerun()
@@ -2562,13 +2774,24 @@ st.divider()
 
 # -------------------- AI player mode --------------------
 st.subheader("④ AIもゲームに参加")
-st.caption("AIは『たとえ・なまえ・ぎゃくてん』の3方向で答えます。絵を先に出して、そのあと答えの解説を音声で聞けます。")
+st.caption("AIカエルは2匹。名前は付けません。2匹とも子どもがクスッと笑える面白さを重視し、それぞれクレヨン調とデッサン調の絵を横並びで表示します。画像は4枚を並列生成して待ち時間を短くしています。")
+
+# Hot-reload compatibility: reset only the AI section if an older one-frog format remains in session.
+if st.session_state.ai_joined and st.session_state.ai_answers:
+    current_ai = st.session_state.ai_answers
+    if not (isinstance(current_ai, dict) and "frog1" in current_ai and "frog2" in current_ai):
+        st.session_state.ai_joined = False
+        st.session_state.ai_answers = None
+        st.session_state.ai_revealed = False
+        st.session_state.ai_images = {}
+        st.session_state.ai_audio = None
+        st.session_state.ai_audio_autoplay_pending = False
 
 if not st.session_state.ai_joined:
-    if st.button("AIもこのラウンドに参加", use_container_width=True):
+    if st.button("AIカエル2匹もこのラウンドに参加", use_container_width=True):
         try:
-            with st.spinner("AIもこっそり考えています…"):
-                answers = player_answers(st.session_state.topic, st.session_state.style)
+            with st.spinner("2匹がこっそり考えています…"):
+                answers = ai_game_answers(st.session_state.topic, st.session_state.style)
             st.session_state.ai_joined = True
             st.session_state.ai_answers = answers
             update_round_history(
@@ -2583,37 +2806,32 @@ if not st.session_state.ai_joined:
                 st.code(str(exc))
 else:
     if not st.session_state.ai_revealed:
-        if st.session_state.ai_answers is None:
-            st.info("AIはまだ答えを作っていません。見るときに3つまとめて考えるので、はじめの読み込みが速くなっています。")
-        else:
-            st.info("AIも3つ考えました。まだ答えは伏せています。")
-
-        if st.button("AIの答えを見る", type="primary", use_container_width=True):
+        st.info("AIカエル2匹も答えを考えました。まだ伏せています。")
+        if st.button("AIカエル2匹の答えを見る", type="primary", use_container_width=True):
             try:
-                with st.spinner("AIが絵つきで3つ考えています…"):
+                with st.spinner("4枚の絵を同時に作っています…"):
                     answers = st.session_state.ai_answers
                     if answers is None:
-                        answers = player_answers(st.session_state.topic, st.session_state.style)
+                        answers = ai_game_answers(st.session_state.topic, st.session_state.style)
                         st.session_state.ai_answers = answers
                         update_round_history(
                             st.session_state.round_id,
                             ai_joined=True,
                             ai_answers=answers,
                         )
-                    st.session_state.ai_images = generate_ai_images(answers)
-                    st.session_state.ai_audio = speech_bytes(
-                        player_speech_text(answers)
-                    )
+                    image_map, audio_bytes = generate_ai_assets(answers)
+                st.session_state.ai_images = image_map
+                st.session_state.ai_audio = audio_bytes
                 st.session_state.ai_audio_autoplay_pending = True
                 st.session_state.ai_revealed = True
                 update_round_history(st.session_state.round_id, ai_revealed=True)
                 st.rerun()
             except Exception as exc:
-                st.error("AIの回答を作れませんでした。もう一度試してください。")
+                st.error("AIの回答や絵を作れませんでした。もう一度試してください。")
                 with st.expander("保護者向け詳細"):
                     st.code(str(exc))
     else:
-        render_player_answers(st.session_state.ai_answers)
+        render_ai_answers(st.session_state.ai_answers, st.session_state.ai_images)
         if st.button("🔊 もう一度AIの説明を聞く", use_container_width=True):
             try:
                 with st.spinner("声を作っています…"):
