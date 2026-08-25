@@ -565,7 +565,7 @@ def speech_bytes(text):
 def generate_player_image(topic, style, label, answer, why, art_style="crayon"):
     art_instruction = {
         "crayon": "Use a child-friendly crayon drawing style with thick waxy strokes, bright colors, and a playful picture-book feeling.",
-        "dessin": "Use a child-friendly colored pencil sketch / dessin style with hand-drawn shading, soft lines, and a lightly realistic but warm look.",
+        "collage": "Use a child-friendly torn-paper collage / cut-paper picture-book style with visible paper textures, layered shapes, handmade edges, and a playful craft feeling.",
     }.get(art_style, "Use a child-friendly picture-book illustration style.")
     prompt = f"""
 Create one square illustration for a Japanese family word-play card game.
@@ -604,10 +604,10 @@ Requirements:
 
 
 def generate_dual_images(topic, style, label, answer, why):
-    """Generate crayon and dessin images in parallel to reduce wait time."""
+    """Generate crayon and collage images in parallel to reduce wait time."""
     jobs = {
         "crayon": ("crayon",),
-        "dessin": ("dessin",),
+        "collage": ("collage",),
     }
     images = {}
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -638,11 +638,11 @@ def generate_reference_assets(topic, style, item):
         f_crayon = executor.submit(
             generate_player_image, topic, style, "参考回答", item["answer"], item["explanation"], "crayon"
         )
-        f_dessin = executor.submit(
-            generate_player_image, topic, style, "参考回答", item["answer"], item["explanation"], "dessin"
+        f_collage = executor.submit(
+            generate_player_image, topic, style, "参考回答", item["answer"], item["explanation"], "collage"
         )
         f_audio = executor.submit(speech_bytes, reference_speech_text(item))
-        images = {"crayon": f_crayon.result(), "dessin": f_dessin.result()}
+        images = {"crayon": f_crayon.result(), "collage": f_collage.result()}
         audio = f_audio.result()
     return images, audio
 
@@ -2044,7 +2044,7 @@ def generate_ai_images(answers):
     jobs = []
     for frog_key, label in (("frog1", "1匹目"), ("frog2", "2匹目")):
         item = answers[frog_key]
-        for art_style in ("crayon", "dessin"):
+        for art_style in ("crayon", "collage"):
             jobs.append((frog_key, art_style, label, item))
 
     image_map = {"frog1": {}, "frog2": {}}
@@ -2072,7 +2072,7 @@ def generate_ai_assets(answers):
         image_futures = {}
         for frog_key, label in (("frog1", "1匹目"), ("frog2", "2匹目")):
             item = answers[frog_key]
-            for art_style in ("crayon", "dessin"):
+            for art_style in ("crayon", "collage"):
                 image_futures[(frog_key, art_style)] = executor.submit(
                     generate_player_image,
                     st.session_state.topic,
@@ -2554,8 +2554,8 @@ def render_dual_images(images, prefix=""):
         if images.get("crayon"):
             st.image(images["crayon"], caption=f"{prefix}クレヨン調", use_container_width=True)
     with col2:
-        if images.get("dessin"):
-            st.image(images["dessin"], caption=f"{prefix}デッサン調", use_container_width=True)
+        if images.get("collage"):
+            st.image(images["collage"], caption=f"{prefix}ちぎり絵・貼り絵調", use_container_width=True)
 
 
 def render_feedback_controls(mode, item, key_suffix):
@@ -2797,7 +2797,7 @@ st.divider()
 # -------------------- AI reference-answer mode --------------------
 st.subheader("② AIの参考回答")
 st.caption(
-    "参考回答は1つだけ。クレヨン調とデッサン調の絵を先に2つ出し、そのあと答えと考え方を音声でやさしく説明します。"
+    "参考回答は1つだけ。クレヨン調とちぎり絵・貼り絵調の絵を先に2つ出し、そのあと答えと考え方を音声でやさしく説明します。"
     "④のAI参加とは別に生成するため、④の答えは見えません。『この回答が良かった』は次回以降ごく弱く参考にし、いつでも評価を消せます。"
 )
 
