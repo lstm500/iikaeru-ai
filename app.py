@@ -479,6 +479,10 @@ Requirements:
     return base64.b64decode(encoded)
 
 
+def generate_reference_image(topic, style, answer, explanation):
+    return generate_player_image(topic, style, "参考回答", answer, explanation)
+
+
 def card_candidates(raw_text, card_type):
     master = allowed_cards(card_type)
     schema = {
@@ -1454,7 +1458,7 @@ def reference_answer(topic, style):
 - 一休さんのように、普通の見方を1回だけずらして「なるほど」と思えるウィットにする。
 - 言い方カードは表面の語尾・擬音・派手な言葉ではなく、「どう見直すか」の条件として使う。
 - お題カードの文言「{topic}」を answer にそのまま使わない。
-- answer は原則ワンフレーズ、最大でも短いツーフレーズ。30文字以内を目安にする。
+- answer はごく短いワンフレーズ中心。長さは今までの三分の一程度として、6〜12文字くらい、長くても16文字以内を目安にする。
 - 5〜6歳が頭に絵を浮かべられ、少し笑える内容にする。
 - 難しい熟語は避ける。皮肉モードでは、5〜6歳にも説明できる「ほめているようで、ほんとうは少し逆」の二重の意味にする。
 - 日本語の漢字・ひらがな・カタカナ・数字・一般的な句読点だけを使う。外国語文字やアルファベットは使わない。
@@ -1517,8 +1521,11 @@ try_it: 自分で考えるためのコツ1つ
             last_problems.append("お題の文言をそのまま使用")
         if any(non_japanese_letters(result.get(key, "")) for key in ("answer", "explanation", "try_it")):
             last_problems.append("日本語以外の文字を使用")
-        if not str(result.get("answer", "")).strip():
+        answer_text = str(result.get("answer", "")).strip()
+        if not answer_text:
             last_problems.append("参考回答が空")
+        if len(answer_text.replace(" ", "").replace("　", "")) > 16:
+            last_problems.append("参考回答が長すぎる")
         if not last_problems:
             alignment = review_topic_alignment(
                 topic,
@@ -1548,7 +1555,7 @@ try_it: 自分で考えるためのコツ1つ
 def reference_speech_text(item):
     return (
         f"参考回答は、{item['answer']}。"
-        f"どう考えたかというと、{item['explanation']}。"
+        f"どう考えたかを説明するね。{item['explanation']}。"
         f"自分で考えるコツは、{item['try_it']}。"
     )
 
@@ -1667,6 +1674,25 @@ def judge_answers(topic, style, players):
     }
 
 
+def generate_ai_images(answers):
+    image_map = {}
+    label_map = {
+        "metaphor": "たとえカエル",
+        "nickname": "なまえカエル",
+        "twist": "ぎゃくてんカエル",
+    }
+    for key, label in label_map.items():
+        item = answers.get(key, {}) or {}
+        image_map[key] = generate_player_image(
+            st.session_state.topic,
+            st.session_state.style,
+            label,
+            str(item.get("answer", "")),
+            str(item.get("why", "")),
+        )
+    return image_map
+
+
 def judge_speech_text(result):
     return (
         f"今回いちばん良かったのは、{result['winner_name']}の、"
@@ -1754,6 +1780,7 @@ DEFAULTS = {
     "ai_audio_autoplay_pending": False,
     "ai_images": {},
     "reference_answer": None,
+    "reference_image": None,
     "reference_audio": None,
     "reference_audio_autoplay_pending": False,
     "topic_explanation": None,
@@ -2122,14 +2149,22 @@ def render_support_result():
             )
 
 
-def render_player_answers(answers, allow_image_generation=False):
+def render_player_answers(answers):
     labels = [
         ("metaphor", "たとえカエル", "frog-yellow"),
         ("nickname", "なまえカエル", "frog-blue"),
         ("twist", "ぎゃくてんカエル", "frog-pink"),
     ]
+    images = st.session_state.get("ai_images", {})
     for key, label, color_class in labels:
         item = answers[key]
+        existing = images.get(key)
+        if existing:
+            st.image(
+                existing,
+                caption=f"{label}：{item['answer']}",
+                use_container_width=True,
+            )
         st.markdown(
             f"""
             <div class="answer-card">
@@ -2146,40 +2181,6 @@ def render_player_answers(answers, allow_image_generation=False):
         if item.get("new_word"):
             st.caption(f"ことばメモ：{item['new_word']} ＝ {item['new_word_meaning']}")
 
-        if allow_image_generation:
-            images = st.session_state.get("ai_images", {})
-            existing = images.get(key)
-            button_label = "🎨 この答えを絵にする" if not existing else "🎨 もう一度絵にする"
-            if st.button(
-                button_label,
-                use_container_width=True,
-                key=f"ai_image_{st.session_state.round_serial}_{key}",
-            ):
-                try:
-                    with st.spinner("絵を作っています…"):
-                        image_bytes = generate_player_image(
-                            st.session_state.topic,
-                            st.session_state.style,
-                            label,
-                            item["answer"],
-                            item["why"],
-                        )
-                    updated = dict(st.session_state.get("ai_images", {}))
-                    updated[key] = image_bytes
-                    st.session_state.ai_images = updated
-                    st.rerun()
-                except Exception as exc:
-                    st.error("絵を作れませんでした。もう一度試してください。")
-                    with st.expander("保護者向け詳細"):
-                        st.code(str(exc))
-
-            existing = st.session_state.get("ai_images", {}).get(key)
-            if existing:
-                st.image(
-                    existing,
-                    caption=f"{label}：{item['answer']}",
-                    use_container_width=True,
-                )
 
 
 # ============================================================
@@ -2352,20 +2353,29 @@ st.divider()
 # -------------------- AI reference-answer mode --------------------
 st.subheader("② AIの参考回答")
 st.caption(
-    "参考回答は1つだけ。答えそのものより、『どこを見て、どう見方を変えたか』を子ども向けに説明します。"
+    "参考回答は1つだけ。まず絵を出してから、答えと考え方を音声でやさしく説明します。"
     "④のAIプレイヤーとは別に生成するため、AIプレイヤーの伏せ回答は見えません。"
 )
 
 if st.session_state.reference_answer is None:
     if st.button("💡 AIの参考回答を見る", use_container_width=True):
         try:
-            with st.spinner("答えと考え方を1つ作っています…"):
-                st.session_state.reference_answer = reference_answer(
+            with st.spinner("絵と答えを作っています…"):
+                item = reference_answer(
                     st.session_state.topic,
                     st.session_state.style,
                 )
-            st.session_state.reference_audio = None
-            st.session_state.reference_audio_autoplay_pending = False
+                image_bytes = generate_reference_image(
+                    st.session_state.topic,
+                    st.session_state.style,
+                    item["answer"],
+                    item["explanation"],
+                )
+                audio_bytes = speech_bytes(reference_speech_text(item))
+            st.session_state.reference_answer = item
+            st.session_state.reference_image = image_bytes
+            st.session_state.reference_audio = audio_bytes
+            st.session_state.reference_audio_autoplay_pending = True
             st.rerun()
         except Exception as exc:
             st.error("参考回答を作れませんでした。もう一度試してください。")
@@ -2373,6 +2383,12 @@ if st.session_state.reference_answer is None:
                 st.code(str(exc))
 else:
     item = st.session_state.reference_answer
+    if st.session_state.reference_image:
+        st.image(
+            st.session_state.reference_image,
+            caption=f"参考回答：{item['answer']}",
+            use_container_width=True,
+        )
     st.markdown(
         f"""
         <div class="answer-card">
@@ -2396,7 +2412,7 @@ else:
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🔊 答えと考え方を聞く", use_container_width=True):
+        if st.button("🔊 もう一度説明を聞く", use_container_width=True):
             try:
                 with st.spinner("声を作っています…"):
                     st.session_state.reference_audio = speech_bytes(
@@ -2412,12 +2428,21 @@ else:
         if st.button("↻ 別の参考回答", use_container_width=True):
             try:
                 with st.spinner("別の見方を1つ考えています…"):
-                    st.session_state.reference_answer = reference_answer(
+                    item = reference_answer(
                         st.session_state.topic,
                         st.session_state.style,
                     )
-                st.session_state.reference_audio = None
-                st.session_state.reference_audio_autoplay_pending = False
+                    image_bytes = generate_reference_image(
+                        st.session_state.topic,
+                        st.session_state.style,
+                        item["answer"],
+                        item["explanation"],
+                    )
+                    audio_bytes = speech_bytes(reference_speech_text(item))
+                st.session_state.reference_answer = item
+                st.session_state.reference_image = image_bytes
+                st.session_state.reference_audio = audio_bytes
+                st.session_state.reference_audio_autoplay_pending = True
                 st.rerun()
             except Exception as exc:
                 st.error("参考回答を作れませんでした。もう一度試してください。")
@@ -2537,7 +2562,7 @@ st.divider()
 
 # -------------------- AI player mode --------------------
 st.subheader("④ AIもゲームに参加")
-st.caption("AIは『たとえ・なまえ・ぎゃくてん』の3方向で答えます。")
+st.caption("AIは『たとえ・なまえ・ぎゃくてん』の3方向で答えます。絵を先に出して、そのあと答えの解説を音声で聞けます。")
 
 if not st.session_state.ai_joined:
     if st.button("AIもこのラウンドに参加", use_container_width=True):
@@ -2565,15 +2590,21 @@ else:
 
         if st.button("AIの答えを見る", type="primary", use_container_width=True):
             try:
-                if st.session_state.ai_answers is None:
-                    with st.spinner("AIが3つ考えています…"):
+                with st.spinner("AIが絵つきで3つ考えています…"):
+                    answers = st.session_state.ai_answers
+                    if answers is None:
                         answers = player_answers(st.session_state.topic, st.session_state.style)
-                    st.session_state.ai_answers = answers
-                    update_round_history(
-                        st.session_state.round_id,
-                        ai_joined=True,
-                        ai_answers=answers,
+                        st.session_state.ai_answers = answers
+                        update_round_history(
+                            st.session_state.round_id,
+                            ai_joined=True,
+                            ai_answers=answers,
+                        )
+                    st.session_state.ai_images = generate_ai_images(answers)
+                    st.session_state.ai_audio = speech_bytes(
+                        player_speech_text(answers)
                     )
+                st.session_state.ai_audio_autoplay_pending = True
                 st.session_state.ai_revealed = True
                 update_round_history(st.session_state.round_id, ai_revealed=True)
                 st.rerun()
@@ -2582,21 +2613,20 @@ else:
                 with st.expander("保護者向け詳細"):
                     st.code(str(exc))
     else:
-        render_player_answers(st.session_state.ai_answers, allow_image_generation=True)
-        if not st.session_state.ai_audio:
-            if st.button("🔊 AIの答えを聞く", use_container_width=True):
-                try:
-                    with st.spinner("声を作っています…"):
-                        st.session_state.ai_audio = speech_bytes(
-                            player_speech_text(st.session_state.ai_answers)
-                        )
-                    st.session_state.ai_audio_autoplay_pending = True
-                    st.rerun()
-                except Exception as exc:
-                    st.error("読み上げ音声を作れませんでした。")
-                    with st.expander("保護者向け詳細"):
-                        st.code(str(exc))
-        else:
+        render_player_answers(st.session_state.ai_answers)
+        if st.button("🔊 もう一度AIの説明を聞く", use_container_width=True):
+            try:
+                with st.spinner("声を作っています…"):
+                    st.session_state.ai_audio = speech_bytes(
+                        player_speech_text(st.session_state.ai_answers)
+                    )
+                st.session_state.ai_audio_autoplay_pending = True
+                st.rerun()
+            except Exception as exc:
+                st.error("読み上げ音声を作れませんでした。")
+                with st.expander("保護者向け詳細"):
+                    st.code(str(exc))
+        if st.session_state.ai_audio:
             st.audio(
                 st.session_state.ai_audio,
                 format="audio/wav",
