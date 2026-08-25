@@ -24,7 +24,7 @@ except Exception:
 
 # ============================================================
 # Basic settings
-# v29: two AI frogs; crayon/dessin image generation is parallelized for faster display.
+# v31: positive-answer feedback is stored in Supabase and used only as a weak preference hint.
 # ============================================================
 st.set_page_config(
     page_title="言いカエル おたすけAI",
@@ -141,6 +141,7 @@ APP_TIMEZONE = secret("APP_TIMEZONE", "Asia/Tokyo")
 SUPABASE_URL = secret("SUPABASE_URL", "")
 SUPABASE_SECRET_KEY = secret("SUPABASE_SECRET_KEY", "")
 CARD_TABLE = secret("CARD_TABLE", "iikaeru_cards")
+FEEDBACK_TABLE = secret("FEEDBACK_TABLE", "iikaeru_answer_feedback")
 USE_FAST_MODE = str(secret("USE_FAST_MODE", "true")).lower() in {"1", "true", "yes", "on"}
 
 
@@ -221,6 +222,124 @@ def is_free_topic_card(card_text):
 
 def history_enabled():
     return bool(create_client and SUPABASE_URL and SUPABASE_SECRET_KEY)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def recent_positive_feedback(mode, style, limit=3):
+    """Return a few recent positive examples for weak preference learning."""
+    if not history_enabled():
+        return []
+    try:
+        result = (
+            supabase_client()
+            .table(FEEDBACK_TABLE)
+            .select("id,mode,topic,style,answer,explanation,created_at")
+            .eq("mode", mode)
+            .eq("style", style)
+            .order("created_at", desc=True)
+            .limit(int(limit))
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        # The app continues normally before the optional v31 SQL is installed.
+        return []
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def feedback_record(mode, topic, style, answer):
+    if not history_enabled():
+        return None
+    try:
+        result = (
+            supabase_client()
+            .table(FEEDBACK_TABLE)
+            .select("id,mode,topic,style,answer,explanation,created_at")
+            .eq("mode", mode)
+            .eq("topic", topic)
+            .eq("style", style)
+            .eq("answer", answer)
+            .limit(1)
+            .execute()
+        )
+        return (result.data or [None])[0]
+    except Exception:
+        return None
+
+
+def save_positive_feedback(mode, topic, style, answer, explanation):
+    """Save one positive rating. Raises a clear error if the v31 table is missing."""
+    if not history_enabled():
+        raise RuntimeError("Supabase が設定されていません。")
+    existing = feedback_record(mode, topic, style, answer)
+    if existing:
+        return existing.get("id")
+    try:
+        result = (
+            supabase_client()
+            .table(FEEDBACK_TABLE)
+            .insert({
+                "mode": mode,
+                "topic": topic,
+                "style": style,
+                "answer": answer,
+                "explanation": explanation or "",
+            })
+            .execute()
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "評価を保存できませんでした。先に v31 の Supabase 用SQLを1回実行してください。"
+        ) from exc
+    recent_positive_feedback.clear()
+    feedback_record.clear()
+    return result.data[0].get("id") if result.data else None
+
+
+def delete_positive_feedback(feedback_id):
+    if not history_enabled():
+        raise RuntimeError("Supabase が設定されていません。")
+    if not feedback_id:
+        return
+    try:
+        (
+            supabase_client()
+            .table(FEEDBACK_TABLE)
+            .delete()
+            .eq("id", feedback_id)
+            .execute()
+        )
+    except Exception as exc:
+        raise RuntimeError("評価を削除できませんでした。") from exc
+    recent_positive_feedback.clear()
+    feedback_record.clear()
+
+
+def weak_preference_hint(mode, style):
+    """Build a deliberately weak, non-copying preference hint from positive feedback."""
+    rows = recent_positive_feedback(mode, style, limit=3)
+    if not rows:
+        return ""
+    examples = []
+    for row in rows:
+        answer = str(row.get("answer") or "").strip()
+        explanation = str(row.get("explanation") or "").strip()
+        if not answer:
+            continue
+        line = f"- 良かった回答：{answer}"
+        if explanation:
+            line += f"／良かった発想の説明：{explanation}"
+        examples.append(line)
+    if not examples:
+        return ""
+    mode_label = "参考回答" if mode == "reference" else "ゲーム参加AI"
+    return (
+        "\n【過去の『この回答が良かった』評価：ごく弱い参考】\n"
+        f"これは{mode_label}で過去に好まれた例です。全体の約10％以下の弱い参考としてだけ使ってください。\n"
+        "元の回答ロジック、お題の一般認識、言い方カードの条件を必ず優先してください。\n"
+        "回答の文言・比喩・固有のアイデアをコピーしないでください。参考にしてよいのは、短さ、具体性、ひねり方、切れ味などの傾向だけです。\n"
+        + "\n".join(examples)
+    )
 
 
 def verify_setup():
@@ -1574,6 +1693,7 @@ def ai_game_answers(topic, style):
     style_instruction = player_style_instruction(style)
     topic_instruction = player_topic_instruction(topic)
     logic_mode = style_logic_mode(style, style_instruction)
+    preference_hint = weak_preference_hint("game", style)
 
     item_properties = {
         "answer": {"type": "string"},
@@ -1621,6 +1741,8 @@ AIカエルは2匹います。名前は付けません。
 {style_instruction}
 
 {sarcasm_generation_rules() if logic_mode == "sarcasm" else poetic_generation_rules() if logic_mode == "poetic" else ""}
+
+{preference_hint}
 
 【回答を作る基本思想】
 - 最優先は「一休さん的なウィット」。普通の見方をそのまま言わず、前提・役割・長所短所・場面・たとえのどれかを1回だけずらす。
@@ -1757,6 +1879,7 @@ def reference_answer(topic, style):
     style_instruction = player_style_instruction(style)
     topic_instruction = player_topic_instruction(topic)
     logic_mode = style_logic_mode(style, style_instruction)
+    preference_hint = weak_preference_hint("reference", style)
     properties = {
         "answer": {"type": "string"},
         "explanation": {"type": "string"},
@@ -1794,6 +1917,8 @@ def reference_answer(topic, style):
 {style_instruction}
 
 {sarcasm_generation_rules() if logic_mode == "sarcasm" else poetic_generation_rules() if logic_mode == "poetic" else ""}
+
+{preference_hint}
 
 【お題の扱い】
 - 「このお題の一般的な意味・定番イメージ」を必ず発想の出発点にする。
@@ -2433,6 +2558,57 @@ def render_dual_images(images, prefix=""):
             st.image(images["dessin"], caption=f"{prefix}デッサン調", use_container_width=True)
 
 
+def render_feedback_controls(mode, item, key_suffix):
+    """Render positive-rating / delete-rating control for one generated answer."""
+    if not history_enabled():
+        return
+    answer = str(item.get("answer") or "").strip()
+    if not answer:
+        return
+    explanation = str(
+        item.get("explanation") or item.get("why") or ""
+    ).strip()
+    record = feedback_record(
+        mode,
+        st.session_state.topic,
+        st.session_state.style,
+        answer,
+    )
+    digest = hashlib.sha1(
+        f"{mode}|{st.session_state.topic}|{st.session_state.style}|{answer}|{key_suffix}".encode("utf-8")
+    ).hexdigest()[:12]
+
+    if record:
+        st.caption("✓ この回答は次回以降、ごく弱く好みの参考にします。")
+        if st.button(
+            "🗑 評価を消す",
+            key=f"feedback_delete_{digest}",
+            use_container_width=True,
+        ):
+            try:
+                delete_positive_feedback(record.get("id"))
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+    else:
+        if st.button(
+            "👍 この回答が良かった",
+            key=f"feedback_like_{digest}",
+            use_container_width=True,
+        ):
+            try:
+                save_positive_feedback(
+                    mode,
+                    st.session_state.topic,
+                    st.session_state.style,
+                    answer,
+                    explanation,
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+
 def render_ai_answers(answers, images):
     for frog_key, index in (("frog1", 1), ("frog2", 2)):
         item = answers[frog_key]
@@ -2447,6 +2623,7 @@ def render_ai_answers(answers, images):
             """,
             unsafe_allow_html=True,
         )
+        render_feedback_controls("game", item, frog_key)
 
 
 
@@ -2621,7 +2798,7 @@ st.divider()
 st.subheader("② AIの参考回答")
 st.caption(
     "参考回答は1つだけ。クレヨン調とデッサン調の絵を先に2つ出し、そのあと答えと考え方を音声でやさしく説明します。"
-    "④のAI参加とは別に生成するため、④の答えは見えません。"
+    "④のAI参加とは別に生成するため、④の答えは見えません。『この回答が良かった』は次回以降ごく弱く参考にし、いつでも評価を消せます。"
 )
 
 if st.session_state.reference_answer is None:
@@ -2669,6 +2846,7 @@ else:
         """,
         unsafe_allow_html=True,
     )
+    render_feedback_controls("reference", item, "reference")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -2820,7 +2998,7 @@ st.divider()
 
 # -------------------- AI player mode --------------------
 st.subheader("④ AIもゲームに参加")
-st.caption("AIカエルは2匹。名前は付けません。以前の『見方を1回ひねる・言い方カードに忠実・一休さん的なウィット』の回答方式に戻し、それぞれクレヨン調とデッサン調の絵を横並びで表示します。画像は4枚を並列生成します。")
+st.caption("AIカエルは2匹。名前は付けません。『見方を1回ひねる・言い方カードに忠実・一休さん的なウィット』を基本にします。『この回答が良かった』は次回以降ごく弱く参考にし、評価を消すと学習対象から外れます。")
 
 # Hot-reload compatibility: reset only the AI section if an older one-frog format remains in session.
 if st.session_state.ai_joined and st.session_state.ai_answers:
